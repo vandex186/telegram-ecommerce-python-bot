@@ -441,7 +441,7 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")]])
         )
         return
-            invoice = create_crypto_payment_invoice(product, user_id, price)
+    invoice = create_crypto_payment_invoice(product, user_id, price)
     if not invoice:
         await update.callback_query.edit_message_text("Failed to create payment invoice. Please try again later.")
         return
