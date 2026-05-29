@@ -1,8 +1,20 @@
 # Automated Ecommerce Bot - Admin Guide
 
 ## Admin Access
-Your admin user ID is: `6069279403`
+Your admin user ID is set in `config.py` / `.env` as `ADMIN_USER_ID` (get it from [@userinfobot](https://t.me/userinfobot))
 Only you can access the admin panel and commands.
+
+## Stock channel catalog
+
+The bot can sync products, prices (from config), and availability from a **private Telegram channel**.
+
+1. Add the bot to channel `-1002277323115` as **admin** (required for private channels).
+2. Post catalog messages in the format: product title, THC/hybrid lines, description, then `❇️ Available` or `❌ Unavailable` / `❌ Unvailable`.
+3. The bot updates the shop when you **post** or **edit** a channel message (with photo + caption).
+4. For the first import: **forward** a catalog post from the channel to the bot in private chat.
+5. `/sync_catalog` — shows how many products are in the database.
+
+Prices per strain are set in `config.py` → `PRODUCT_PRICES` (key = slug from product name). Shop shows only **Available** items.
 
 ## Admin Panel Features
 

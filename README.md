@@ -2,6 +2,23 @@
 
 A comprehensive Telegram bot for managing an automated ecommerce shop with advanced features including order management, giveaways, discount codes, and payment processing.
 
+**Repository:** [github.com/wrogg/telegram-ecommerce-python-bot](https://github.com/wrogg/telegram-ecommerce-python-bot)
+
+## Catalog variants (branches)
+
+This project has two catalog modes on separate branches:
+
+| Branch | Mode |
+|--------|------|
+| [`catalog/inline-buttons`](BRANCHES.md) | Products as inline menu buttons (`config.PRODUCTS`) |
+| [`catalog/channel-cards`](BRANCHES.md) | Product cards synced from a private Telegram channel |
+
+See **[BRANCHES.md](BRANCHES.md)** for descriptions and how to fork/switch branches.
+
+## Run 24/7
+
+GitHub stores the code only. For a bot that runs around the clock, deploy to Render, Railway, or a VPS — see **[DEPLOY.md](DEPLOY.md)**.
+
 ## Features
 
 ### Shopping System
@@ -38,7 +55,7 @@ A comprehensive Telegram bot for managing an automated ecommerce shop with advan
 ## Technical Stack
 
 - **Language**: Python 3.10+
-- **Framework**: python-telegram-bot 13.15
+- **Framework**: python-telegram-bot 20+
 - **Database**: SQLite with automatic schema creation
 - **Payment**: Crypto payment provider API integration
 - **Architecture**: Event-driven with async/await
@@ -52,10 +69,11 @@ A comprehensive Telegram bot for managing an automated ecommerce shop with advan
 
 ### Setup Instructions
 
-1. **Clone the repository**
+1. **Clone the repository** (pick a branch — see [BRANCHES.md](BRANCHES.md))
    ```bash
-   git clone https://github.com/yourusername/automated-ecommerce-bot-telegram.git
-   cd automated-ecommerce-bot-telegram
+   git clone https://github.com/wrogg/telegram-ecommerce-python-bot.git
+   cd telegram-ecommerce-python-bot
+   git checkout catalog/channel-cards   # or catalog/inline-buttons
    ```
 
 2. **Install dependencies**
@@ -79,8 +97,9 @@ A comprehensive Telegram bot for managing an automated ecommerce shop with advan
 
 5. **Run the bot**
    ```bash
-   python bot.py
+   ./run.sh
    ```
+   Or see [DEPLOY.md](DEPLOY.md) for 24/7 hosting.
 
 ## Configuration
 

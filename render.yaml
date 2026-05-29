@@ -1,0 +1,20 @@
+# Render Blueprint: Background Worker for 24/7 Telegram bot polling
+# Import this file in Render Dashboard → New → Blueprint
+
+services:
+  - type: worker
+    name: telegram-ecommerce-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt && (pip uninstall -y apscheduler || true)
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: STOCK_CHANNEL_ID
+        sync: false
+      - key: OXAPAY_API_KEY
+        sync: false
+      - key: TZ
+        value: UTC

@@ -1,8 +1,19 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import html
+import re
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MessageOriginChannel,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import requests
 import config
+import catalog_store
 import time
 import random
 import sqlite3
@@ -10,6 +21,141 @@ from datetime import datetime, date
 import os
 
 ADMIN_USER_ID = config.ADMIN_USER_ID  # Get from config file
+
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def apply_fallback_html_formatting(text: str) -> str:
+    """Apply lightweight formatting when source text has no HTML markup."""
+    lines = text.splitlines()
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            out.append("")
+            continue
+        if stripped.startswith("-"):
+            out.append(html.escape(line))
+            continue
+        # Emphasize short descriptor lines (title, THC, hybrid, ratios, labels).
+        if len(stripped) <= 52 or any(k in stripped.lower() for k in ("thc", "cbd", "sativa", "indica", "hybrid")):
+            out.append(f"<b>{html.escape(line)}</b>")
+        else:
+            out.append(html.escape(line))
+    return "\n".join(out)
+
+
+def format_money(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def format_price(value: float) -> str:
+    return f"{config.CURRENCY}{format_money(value)}"
+
+
+def get_cart_items(user_data: dict) -> list:
+    return user_data.setdefault("cart_items", [])
+
+
+def get_cart_subtotal(user_data: dict) -> float:
+    return round(sum(float(item.get("line_price", 0.0)) for item in get_cart_items(user_data)), 2)
+
+
+def reset_cart_discount(user_data: dict) -> None:
+    user_data["cart_price"] = None
+    user_data["cart_discount_code"] = None
+    user_data["cart_discount_percent"] = 0
+    user_data["cart_referred_by"] = None
+
+
+def format_cart_item_block(item_num: int, item: dict) -> list[str]:
+    name = item.get("product_name", "Item")
+    qty = item.get("qty", 0)
+    price = format_price(item.get("line_price", 0.0))
+    return [f"{item_num}) {name}", f"{qty}g = {price}"]
+
+
+def build_cart_message(user_data: dict) -> str:
+    cart_items = get_cart_items(user_data)
+    discount_code = user_data.get("cart_discount_code")
+    discount_percent = user_data.get("cart_discount_percent", 0)
+    subtotal = get_cart_subtotal(user_data)
+    total = subtotal
+    if discount_percent:
+        total = round(subtotal * (1 - discount_percent / 100), 2)
+    lines = ["Cart:", ""]
+    for idx, item in enumerate(cart_items, start=1):
+        lines.extend(format_cart_item_block(idx, item))
+        if idx < len(cart_items):
+            lines.append("")
+    lines.append("")
+    lines.append(f"Total: {format_price(total)}")
+    if discount_percent:
+        lines.append(f"Discount: {discount_percent}% ({discount_code})")
+    lines.append("")
+    lines.append("- - - - - - - - - - - - - - - - -")
+    lines.append("You can delete wrong items:")
+    return "\n".join(lines)
+
+
+def build_cart_keyboard(user_data: dict) -> list:
+    cart_items = get_cart_items(user_data)
+    address = user_data.get("cart_address")
+    keyboard = []
+    if cart_items:
+        remove_buttons = [
+            InlineKeyboardButton(f"{i} = ❌", callback_data=f"cart_remove_{i - 1}")
+            for i in range(1, len(cart_items) + 1)
+        ]
+        max_per_row = 8
+        for start in range(0, len(remove_buttons), max_per_row):
+            keyboard.append(remove_buttons[start : start + max_per_row])
+    address_btn_text = "Location ✅" if address else "Set Location"
+    keyboard.extend([
+        [InlineKeyboardButton(address_btn_text, callback_data="enter_address")],
+        [InlineKeyboardButton("Apply Discount Code", callback_data="apply_discount")],
+        [InlineKeyboardButton("Checkout", callback_data="checkout")],
+        [InlineKeyboardButton("Back", callback_data="menu_shop"), InlineKeyboardButton("Main Menu", callback_data="main_menu")],
+    ])
+    return keyboard
+
+
+def get_shop_products():
+    if config.STOCK_CHANNEL_ID:
+        return catalog_store.get_shop_products(available_only=True)
+    return list(config.PRODUCTS)
+
+
+def find_product(product_id):
+    if config.STOCK_CHANNEL_ID:
+        return catalog_store.get_product_by_id(product_id)
+    return next((p for p in config.PRODUCTS if p["id"] == product_id), None)
+
+
+async def process_catalog_message(message) -> int:
+    text_plain = message.caption or message.text or ""
+    text_formatted = None
+    if message.caption:
+        text_formatted = getattr(message, "caption_html", None) or message.caption
+    elif message.text:
+        text_formatted = getattr(message, "text_html", None) or message.text
+    text_for_store = text_formatted or text_plain
+    photo_file_id = message.photo[-1].file_id if message.photo else None
+    posted_at = message.date.isoformat() if getattr(message, "date", None) else None
+    chat_id = message.chat_id if getattr(message, "chat_id", None) else None
+    message_id = message.message_id if getattr(message, "message_id", None) else None
+    catalog_store.save_source_post(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text_for_store,
+        photo_file_id=photo_file_id,
+        posted_at=posted_at,
+    )
+    parsed_catalog = catalog_store.sync_from_text(text_for_store, photo_file_id, message.message_id)
+    parsed_prices = catalog_store.sync_price_post(text_plain, message.message_id)
+    return parsed_catalog + parsed_prices
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -234,15 +380,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Welcome to the shop!")
         target = update.message
     elif hasattr(update, 'callback_query') and update.callback_query:
-        await update.callback_query.edit_message_text("Welcome to the shop!")
-        target = update.callback_query.message
+        query = update.callback_query
+        try:
+            await query.edit_message_text("Welcome to the shop!")
+            target = query.message
+        except Exception:
+            # Callback may originate from media message; send a fresh text message.
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            target = await query.message.chat.send_message("Welcome to the shop!")
     else:
         return
     
     if is_admin:
         keyboard = [
             [InlineKeyboardButton("Shop", callback_data="menu_shop")],
-            [InlineKeyboardButton("Giveaways", callback_data="menu_giveaways")],
+            [InlineKeyboardButton("Cart", callback_data="open_cart")],
             [InlineKeyboardButton("Support", callback_data="menu_support")],
             [InlineKeyboardButton("Refer a Friend", callback_data="menu_refer")],
             [InlineKeyboardButton("Admin Panel", callback_data="admin_panel")]
@@ -250,7 +405,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         keyboard = [
             [InlineKeyboardButton("Shop", callback_data="menu_shop")],
-            [InlineKeyboardButton("Giveaways", callback_data="menu_giveaways")],
+            [InlineKeyboardButton("Cart", callback_data="open_cart")],
             [InlineKeyboardButton("Support", callback_data="menu_support")],
             [InlineKeyboardButton("Refer a Friend", callback_data="menu_refer")]
         ]
@@ -264,13 +419,29 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
     if data == "menu_shop":
+        products = get_shop_products()
         keyboard = [
-            [InlineKeyboardButton(f"{p['name']}", callback_data=f"select_{p['id']}")]
-            for p in config.PRODUCTS
+            [InlineKeyboardButton(p["name"], callback_data=f"select_{p['id']}")]
+            for p in products
         ]
         keyboard.append([InlineKeyboardButton("Main Menu", callback_data="main_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text('Select a product:', reply_markup=reply_markup)
+        msg = "Available now:"
+        if config.STOCK_CHANNEL_ID and not products:
+            total, available = catalog_store.catalog_stats()
+            if total == 0:
+                msg += "\n\n(Catalog empty — add the bot to the stock channel as admin, then post or edit a catalog message.)"
+            else:
+                msg += f"\n\n({available} of {total} in stock — nothing available right now.)"
+        try:
+            await query.edit_message_text(msg, reply_markup=reply_markup)
+        except Exception:
+            # "Back" from media card: text edit may fail, so recreate the menu message.
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(msg, reply_markup=reply_markup)
     elif data == "menu_giveaways":
         giveaways = get_active_giveaways()
         if not giveaways:
@@ -300,21 +471,61 @@ async def select_product_handler(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     if data.startswith("select_"):
         product_id = int(data.split("_")[1])
-        product = next((p for p in config.PRODUCTS if p["id"] == product_id), None)
+        product = find_product(product_id)
         if not product:
             await query.edit_message_text("Product not found.")
             return
+        if not product.get("in_stock", True):
+            await query.edit_message_text(
+                "This item is currently unavailable.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back to Shop", callback_data="menu_shop")]]
+                ),
+            )
+            return
         context.user_data["cart_product"] = product
+        product_prices = product.get("prices", {}) or {}
+        qty_map = {int(q): float(p) for q, p in product_prices.items()} if product_prices else {}
+        qty_buttons = sorted(qty_map.items(), key=lambda item: item[0])[:2]
+        if qty_buttons:
+            qty_row = [
+                InlineKeyboardButton(
+                    f"{qty}gr ={format_money(price)}{config.CURRENCY}",
+                    callback_data=f"qty_{qty}",
+                )
+                for qty, price in qty_buttons
+            ]
+        else:
+            qty_row = [InlineKeyboardButton("No prices in channel post", callback_data="noop_qty_missing")]
         keyboard = [
-            [InlineKeyboardButton(f"{qty} for £{product['prices'][qty]} {config.CURRENCY}", callback_data=f"qty_{qty}") for qty in product["prices"]],
+            qty_row,
+            [InlineKeyboardButton("Cart", callback_data="open_cart")],
             [InlineKeyboardButton("Back", callback_data="menu_shop"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"Select quantity for {product['name']}:\n{product['description']}", reply_markup=reply_markup)
+        description = product.get("description", "") or ""
+        # Fallback: apply simple rich formatting if source does not contain HTML tags.
+        if not HTML_TAG_RE.search(description):
+            description = apply_fallback_html_formatting(description)
+        caption = f"{description}\n\nSelect quantity:"
+        photo_file_id = product.get("photo_file_id")
+        image_name = product.get("image")
+        image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), image_name) if image_name else ""
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        chat = query.message.chat
+        if photo_file_id:
+            await chat.send_photo(photo=photo_file_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        elif image_name and os.path.isfile(image_path):
+            with open(image_path, "rb") as photo:
+                await chat.send_photo(photo=photo, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        else:
+            await chat.send_message(caption, reply_markup=reply_markup, parse_mode="HTML")
 
 async def quantity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     user_id = query.from_user.id
     if data.startswith("qty_"):
@@ -323,46 +534,91 @@ async def quantity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not product:
             await query.edit_message_text("No product selected.")
             return
-        price = product["prices"][qty]
-        context.user_data["cart_quantity"] = qty
-        context.user_data["cart_price"] = price
-        context.user_data["cart_discount_code"] = None
-        context.user_data["cart_discount_percent"] = 0
-        context.user_data["cart_referred_by"] = None
-        context.user_data["cart_address"] = None
-        await show_cart(update, context)
+        prices = product.get("prices", {}) or {}
+        price = prices.get(qty)
+        if price is None:
+            await query.answer("Price not found in channel price post.", show_alert=True)
+            return
+        cart_items = get_cart_items(context.user_data)
+        line_price = round(float(price), 2)
+        cart_items.append(
+            {
+                "product_id": product.get("id"),
+                "product_name": product.get("name", "Item"),
+                "qty": int(qty),
+                "unit_price": line_price,
+                "line_price": line_price,
+                "description": product.get("description", ""),
+            }
+        )
+        reset_cart_discount(context.user_data)
+        await query.answer(f"Added: {product.get('name', 'Item')}, {qty}g, {format_price(line_price)}")
+
+
+async def open_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_data = context.user_data
+    cart_items = get_cart_items(user_data)
+    if not cart_items:
+        await query.edit_message_text(
+            "Your cart is empty.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Shop", callback_data="menu_shop")]])
+        )
+        return
+    await show_cart(update, context)
 
 async def show_cart(update_or_query, context):
     user_data = context.user_data
-    product = user_data.get("cart_product")
-    qty = user_data.get("cart_quantity")
-    price = user_data.get("cart_price")
-    discount_code = user_data.get("cart_discount_code")
-    discount_percent = user_data.get("cart_discount_percent", 0)
-    referred_by = user_data.get("cart_referred_by")
-    address = user_data.get("cart_address")
-    subtotal = price
-    msg = f"Cart:\nProduct: {product['name']}\nQuantity: {qty}\nSubtotal: £{subtotal} {config.CURRENCY}"
-    if discount_percent:
-        msg += f"\nDiscount: {discount_percent}% ({discount_code})"
-    # Do not echo the address, just show checkmark on button
-    address_entered = bool(address)
-    address_btn_text = "Enter Address ✅" if address_entered else "Enter Address"
-    keyboard = [
-        [InlineKeyboardButton(address_btn_text, callback_data="enter_address")],
-        [InlineKeyboardButton("Apply Discount Code", callback_data="apply_discount")],
-        [InlineKeyboardButton("Checkout", callback_data="checkout")],
-        [InlineKeyboardButton("Back", callback_data="menu_shop"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    cart_items = get_cart_items(user_data)
+    if not cart_items:
+        msg = "Your cart is empty."
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Shop", callback_data="menu_shop")]])
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg, reply_markup=reply_markup)
+        elif hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(msg, reply_markup=reply_markup)
+        elif hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
+            await update_or_query.callback_query.edit_message_text(msg, reply_markup=reply_markup)
+        return
 
-    # Robust handling for both messages and callback queries
+    msg = build_cart_message(user_data)
+    reply_markup = InlineKeyboardMarkup(build_cart_keyboard(user_data))
+
+    # Robust handling for both text and media-origin callbacks.
     if hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(msg, reply_markup=reply_markup)
     elif hasattr(update_or_query, 'message') and update_or_query.message:
         await update_or_query.message.reply_text(msg, reply_markup=reply_markup)
     elif hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
-        await update_or_query.callback_query.edit_message_text(msg, reply_markup=reply_markup)
+        query = update_or_query.callback_query
+        try:
+            await query.edit_message_text(msg, reply_markup=reply_markup)
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(msg, reply_markup=reply_markup)
+
+
+async def remove_cart_item_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        idx = int(query.data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.answer("Invalid item.", show_alert=True)
+        return
+    user_data = context.user_data
+    cart_items = get_cart_items(user_data)
+    if idx < 0 or idx >= len(cart_items):
+        await query.answer("Item not found.", show_alert=True)
+        return
+    cart_items.pop(idx)
+    reset_cart_discount(user_data)
+    await show_cart(update, context)
+
 
 async def cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -371,8 +627,16 @@ async def cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     if data == "enter_address":
         user_data["awaiting_address"] = True
-        await query.edit_message_text(
-            "Please enter your shipping address in this format:\nJohn Doe\nFlat 2B, 123 Green Street\nLondon\nNW1 5DB\nUnited Kingdom"
+        location_keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("use my current location", request_location=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            input_field_placeholder="Tap to share your location",
+        )
+        await query.message.chat.send_message(
+            "Send your location pin in Telegram map, or paste a Google Maps link + comment "
+            "(hotel name, house/apartment, entry notes).",
+            reply_markup=location_keyboard,
         )
     elif data == "apply_discount":
         user_data["awaiting_discount"] = True
@@ -389,18 +653,41 @@ async def address_message_handler(update: Update, context: ContextTypes.DEFAULT_
     user_data = context.user_data
     if user_data.get("awaiting_address"):
         address = update.message.text.strip()
+        maps_hint = "google.com/maps" in address.lower() or "maps.app.goo.gl" in address.lower()
+        if not maps_hint:
+            await update.message.reply_text(
+                "Please send a Google Maps link + comment (hotel/house/apartment details), "
+                "or send your location pin."
+            )
+            return
         user_data["cart_address"] = address
         user_data["awaiting_address"] = False
+        await update.message.reply_text("Location saved.", reply_markup=ReplyKeyboardRemove())
         await show_cart(update, context)
+
+
+async def location_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.user_data
+    if not user_data.get("awaiting_address"):
+        return
+    loc = update.message.location
+    if not loc:
+        return
+    user_data["cart_address"] = f"https://maps.google.com/?q={loc.latitude},{loc.longitude}"
+    user_data["awaiting_address"] = False
+    await update.message.reply_text("Location saved.", reply_markup=ReplyKeyboardRemove())
+    await show_cart(update, context)
 
 async def discount_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = context.user_data
     if user_data.get("awaiting_discount"):
         text = update.message.text.strip()
-        product = user_data.get("cart_product")
-        qty = user_data.get("cart_quantity")
-        price = product["prices"][qty]
+        subtotal = get_cart_subtotal(user_data)
+        if subtotal <= 0:
+            user_data["awaiting_discount"] = False
+            await update.message.reply_text("Cart is empty.")
+            return
         discount_percent = 0
         discount_code = None
         referred_by = None
@@ -416,9 +703,10 @@ async def discount_message_handler(update: Update, context: ContextTypes.DEFAULT
                 if d:
                     discount_percent = d["percent"]
                     discount_code = code
+        total_after_discount = subtotal
         if discount_percent:
-            price = round(price * (1 - discount_percent / 100), 2)
-        user_data["cart_price"] = price
+            total_after_discount = round(subtotal * (1 - discount_percent / 100), 2)
+        user_data["cart_price"] = total_after_discount
         user_data["cart_discount_code"] = discount_code
         user_data["cart_discount_percent"] = discount_percent
         user_data["cart_referred_by"] = referred_by
@@ -428,20 +716,28 @@ async def discount_message_handler(update: Update, context: ContextTypes.DEFAULT
 async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = context.user_data
-    product = user_data.get("cart_product")
-    qty = user_data.get("cart_quantity")
+    cart_items = get_cart_items(user_data)
+    if not cart_items:
+        await update.callback_query.edit_message_text(
+            "Your cart is empty.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Shop", callback_data="menu_shop")]])
+        )
+        return
+    subtotal = get_cart_subtotal(user_data)
     price = user_data.get("cart_price")
+    if price is None:
+        price = subtotal
     discount_code = user_data.get("cart_discount_code")
     discount_percent = user_data.get("cart_discount_percent", 0)
-    referred_by = user_data.get("cart_referred_by")
     address = user_data.get("cart_address")
     if not address:
         await update.callback_query.edit_message_text(
-            "Please enter your address before checking out.",
+            "Please set your location before checkout (pin on map or Google Maps link + comment).",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")]])
         )
         return
-    invoice = create_crypto_payment_invoice(product, user_id, price)
+    invoice_product = {"id": 0, "name": "Cart order"}
+    invoice = create_crypto_payment_invoice(invoice_product, user_id, price)
     if not invoice:
         await update.callback_query.edit_message_text("Failed to create payment invoice. Please try again later.")
         return
@@ -450,17 +746,16 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"Your Telegram User ID: {user_id}\n"
         f"Your Crypto Payment Transaction ID: {invoice_id}\n"
-        f"Please pay £{price} {config.CURRENCY} using the link below:\n{pay_url}\n\n"
+        f"Please pay {format_price(price)} using the link below:\n{pay_url}\n\n"
         "After payment, click the button below."
     )
     user_data["pending_invoice_id"] = invoice_id
-    user_data["pending_product_id"] = product["id"]
-    user_data["pending_quantity"] = qty
+    user_data["pending_items"] = list(cart_items)
     user_data["pending_price"] = price
     await update.callback_query.edit_message_text(
         message,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("I've paid", callback_data=f"check_{invoice_id}_{product['id']}"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
+            [InlineKeyboardButton("I've paid", callback_data=f"check_{invoice_id}_0"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
         ])
     )
 
@@ -471,6 +766,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await select_product_handler(update, context)
     elif data.startswith("qty_"):
         await quantity_handler(update, context)
+    elif data == "open_cart":
+        await open_cart_handler(update, context)
+    elif data.startswith("cart_remove_"):
+        await remove_cart_item_handler(update, context)
+    elif data == "noop_qty_missing":
+        await query.answer("No price post for this product yet.", show_alert=True)
+    elif data == "menu_shop":
+        await menu_handler(update, context)
+    elif data == "main_menu":
+        await start(update, context)
     elif data.startswith("giveaway_"):
         giveaway_id = int(data.split("_")[1])
         giveaways = get_active_giveaways()
@@ -504,26 +809,40 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(message, reply_markup=reply_markup)
     elif data == "back_to_cart":
         await show_cart(update, context)
-    elif data in ["enter_address", "apply_discount", "checkout", "menu_shop", "main_menu"]:
-        if data == "main_menu":
-            await start(update, context)
-        else:
-            await cart_handler(update, context)
+    elif data in ["enter_address", "apply_discount", "checkout"]:
+        await cart_handler(update, context)
     elif data.startswith("check_"):
         _, invoice_id, product_id = data.split("_")
         user_data = context.user_data
         status = check_crypto_payment_invoice(invoice_id)
         if status and status.get("status") == "paid":
-            product = user_data.get("cart_product")
-            qty = user_data.get("cart_quantity")
-            price = user_data.get("cart_price")
+            items = user_data.get("pending_items") or get_cart_items(user_data)
+            if not items:
+                await query.edit_message_text("Your cart is empty.")
+                return
+            total_price = user_data.get("cart_price")
             discount_code = user_data.get("cart_discount_code")
             discount_percent = user_data.get("cart_discount_percent", 0)
             referred_by = user_data.get("cart_referred_by")
             address = user_data.get("cart_address")
-            save_order(update.effective_user.id, product, qty, price, invoice_id, discount_code, discount_percent, referred_by, address)
-            await query.edit_message_text(f"Payment received! Here is your product: {product['name']}\n{product['description']}\n\nYour order will be shipped to:\n{address}")
-            for key in ["cart_product", "cart_quantity", "cart_price", "cart_discount_code", "cart_discount_percent", "cart_referred_by", "cart_address", "pending_invoice_id", "pending_product_id", "pending_quantity", "pending_price"]:
+            for item in items:
+                line_price = float(item.get("line_price", 0))
+                if discount_percent:
+                    line_price = round(line_price * (1 - discount_percent / 100), 2)
+                product = {"id": item.get("product_id", 0), "name": item.get("product_name", "Item")}
+                qty = int(item.get("qty", 1))
+                save_order(update.effective_user.id, product, qty, line_price, invoice_id, discount_code, discount_percent, referred_by, address)
+
+            summary = ["Payment received! Items:", ""]
+            for idx, item in enumerate(items, start=1):
+                summary.extend(format_cart_item_block(idx, item))
+                if idx < len(items):
+                    summary.append("")
+            if total_price is not None:
+                summary.append(f"\nTotal paid: {format_price(total_price)}")
+            summary.append(f"\nShipping location:\n{address}")
+            await query.edit_message_text("\n".join(summary))
+            for key in ["cart_items", "cart_product", "cart_quantity", "cart_price", "cart_discount_code", "cart_discount_percent", "cart_referred_by", "cart_address", "pending_invoice_id", "pending_items", "pending_price"]:
                 context.user_data.pop(key, None)
         else:
             await query.edit_message_text("Payment not detected yet. Please wait a minute and try again.")
@@ -571,7 +890,7 @@ async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = "Recent Orders:\n"
     for o in orders:
-        msg += f"\nTime: {o[0]}\nUser ID: {o[1]}\nProduct: {o[3]} (ID: {o[2]})\nQuantity: {o[4]}\nPrice: £{o[5]} {config.CURRENCY}\nInvoice ID: {o[6]}\nDiscount: {o[7]} ({o[8]}%)\nReferred by: {o[9]}\nAddress: {o[10]}\n---"
+        msg += f"\nTime: {o[0]}\nUser ID: {o[1]}\nProduct: {o[3]} (ID: {o[2]})\nQuantity: {o[4]}\nPrice: {format_price(o[5])}\nInvoice ID: {o[6]}\nDiscount: {o[7]} ({o[8]}%)\nReferred by: {o[9]}\nAddress: {o[10]}\n---"
     await update.message.reply_text(msg)
 
 async def addcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,7 +1042,7 @@ async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     msg = "🤖 **Bot Status Report**\n\n"
     msg += f"📦 **Total Orders:** {total_orders}\n"
-    msg += f"💰 **Total Revenue:** £{total_revenue} {config.CURRENCY}\n"
+    msg += f"💰 **Total Revenue:** {format_price(total_revenue)}\n"
     msg += f"🎁 **Active Giveaways:** {active_giveaways}\n"
     msg += f"👥 **Total Giveaway Entries:** {total_entries}\n"
     msg += f"📅 **Report Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -773,7 +1092,7 @@ async def admin_orders_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         msg += f"{i}. Order #{order[0]}\n"
         msg += f"User: {order[1]}\n"
         msg += f"Product: {order[3]} (Qty: {order[4]})\n"
-        msg += f"Price: £{order[5]} {config.CURRENCY}\n"
+        msg += f"Price: {format_price(order[5])}\n"
         msg += f"Date: {order[0][:19]}\n"
         if order[7]:  # Discount code
             msg += f"Discount: {order[7]} ({order[8]}%)\n"
@@ -781,7 +1100,7 @@ async def admin_orders_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         msg += "---\n"
         total_revenue += order[5]
     
-    msg += f"\nTotal Revenue (last 10): £{total_revenue} {config.CURRENCY}"
+    msg += f"\nTotal Revenue (last 10): {format_price(total_revenue)}"
     
     keyboard = [
         [InlineKeyboardButton("Export Orders", callback_data="admin_export_orders")],
@@ -862,7 +1181,7 @@ async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     msg = "📈 Bot Statistics\n\n"
     msg += f"📦 Total Orders: {total_orders}\n"
-    msg += f"💰 Total Revenue: £{total_revenue} {config.CURRENCY}\n"
+    msg += f"💰 Total Revenue: {format_price(total_revenue)}\n"
     msg += f"🎁 Active Giveaways: {active_giveaways}\n"
     msg += f"👥 Total Giveaway Entries: {total_entries}\n"
     msg += f"📅 Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
@@ -1008,9 +1327,61 @@ async def view_entries_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
 
+
+async def channel_catalog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = update.channel_post or update.edited_channel_post
+    if not post or post.chat_id != config.STOCK_CHANNEL_ID:
+        return
+    count = await process_catalog_message(post)
+    logging.info("Catalog sync: %s products from channel message %s", count, post.message_id)
+
+
+async def admin_forwarded_catalog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or update.effective_user.id != ADMIN_USER_ID:
+        return
+    channel_id = None
+    if msg.forward_from_chat:
+        channel_id = msg.forward_from_chat.id
+    elif msg.forward_origin and isinstance(msg.forward_origin, MessageOriginChannel):
+        channel_id = msg.forward_origin.chat.id
+    if channel_id != config.STOCK_CHANNEL_ID:
+        return
+    count = await process_catalog_message(msg)
+    await msg.reply_text(f"Catalog updated: {count} product(s) parsed.")
+
+
+async def sync_catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Not authorized.")
+        return
+    total, available = catalog_store.catalog_stats()
+    await update.message.reply_text(
+        f"Catalog in DB: {total} total, {available} in stock.\n\n"
+        "Refresh options:\n"
+        "• Post or edit a catalog message in the stock channel\n"
+        "• Forward that post to this bot\n\n"
+        "The bot must be an admin in the private channel."
+    )
+
+
+async def sync_last_30_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Not authorized.")
+        return
+    scanned, imported = catalog_store.sync_last_source_posts(limit=30)
+    total, available = catalog_store.catalog_stats()
+    await update.message.reply_text(
+        f"Re-synced last {scanned} cached post(s).\n"
+        f"Parsed product entries: {imported}\n"
+        f"Catalog now: {total} total, {available} available."
+    )
+
+
 if __name__ == "__main__":
     init_db()
     init_giveaway_db()
+    catalog_store.init_catalog_db()
     app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
@@ -1021,7 +1392,12 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("view_entries", view_giveaway_entries))
     app.add_handler(CommandHandler("export_orders", export_orders))
     app.add_handler(CommandHandler("bot_status", bot_status))
+    app.add_handler(CommandHandler("sync_catalog", sync_catalog_cmd))
+    app.add_handler(CommandHandler("sync_last_30", sync_last_30_cmd))
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_catalog_handler))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, admin_forwarded_catalog_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, address_message_handler))
+    app.add_handler(MessageHandler(filters.LOCATION, location_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, discount_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message_handler))
     print("Bot is running...")
