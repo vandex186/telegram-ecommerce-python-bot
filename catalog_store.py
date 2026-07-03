@@ -5,7 +5,14 @@ from datetime import datetime
 from typing import Optional
 
 import config
-from catalog_parser import parse_catalog_text, parse_price_post, parse_price_post_entries
+from catalog_parser import (
+    is_price_post,
+    parse_catalog_text,
+    parse_price_post,
+    parse_price_post_entries,
+    parse_price_post_entries_with_links,
+    _stable_id,
+)
 
 DB_PATH = config.DATABASE_FILE
 
@@ -55,23 +62,34 @@ def init_catalog_db() -> None:
     conn.close()
 
 
-def upsert_products(products: list[dict], photo_file_id: Optional[str], message_id: Optional[int]) -> int:
+def upsert_products(
+    products: list[dict],
+    photo_file_id: Optional[str],
+    message_id: Optional[int],
+    *,
+    force_prices: bool = False,
+) -> int:
     if not products:
         return 0
     now = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    prices_clause = (
+        "prices_json=excluded.prices_json"
+        if force_prices
+        else "prices_json=COALESCE(excluded.prices_json, catalog_products.prices_json)"
+    )
     count = 0
     for p in products:
         c.execute(
-            """INSERT INTO catalog_products
+            f"""INSERT INTO catalog_products
                (id, slug, name, description, in_stock, prices_json, photo_file_id, source_message_id, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(slug) DO UPDATE SET
                  name=excluded.name,
                  description=excluded.description,
                  in_stock=excluded.in_stock,
-                 prices_json=COALESCE(excluded.prices_json, catalog_products.prices_json),
+                 {prices_clause},
                  photo_file_id=COALESCE(excluded.photo_file_id, catalog_products.photo_file_id),
                  source_message_id=excluded.source_message_id,
                  updated_at=excluded.updated_at""",
@@ -159,7 +177,7 @@ def save_source_post(
     conn.close()
 
 
-def sync_last_source_posts(limit: int = 30) -> tuple[int, int]:
+def _fetch_newest_source_posts(limit: int) -> list[tuple]:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
@@ -169,16 +187,333 @@ def sync_last_source_posts(limit: int = 30) -> tuple[int, int]:
            LIMIT ?""",
         (limit,),
     )
+    rows = list(reversed(c.fetchall()))
+    conn.close()
+    return rows
+
+
+def _recent_catalog_message_ids(lookback: int) -> set[int]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """SELECT message_id, text
+           FROM catalog_source_posts
+           WHERE message_id IS NOT NULL
+           ORDER BY COALESCE(posted_at, saved_at) DESC, id DESC"""
+    )
     rows = c.fetchall()
     conn.close()
 
+    ids: list[int] = []
+    for message_id, text in rows:
+        if parse_catalog_text(text):
+            ids.append(message_id)
+        if len(ids) >= lookback:
+            break
+    return set(ids)
+
+
+def apply_recent_catalog_availability(lookback: int) -> int:
+    """Keep in stock only products tied to a recent catalog card post."""
+    recent_ids = _recent_catalog_message_ids(lookback)
+    if not recent_ids:
+        return 0
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    placeholders = ",".join("?" * len(recent_ids))
+    c.execute(
+        f"""UPDATE catalog_products
+            SET in_stock = 0
+            WHERE in_stock = 1
+              AND source_message_id IS NOT NULL
+              AND source_message_id NOT IN ({placeholders})""",
+        tuple(recent_ids),
+    )
+    hidden = c.rowcount
+    conn.commit()
+    conn.close()
+    return hidden
+
+
+def prune_source_posts(keep: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM catalog_source_posts")
+    total = c.fetchone()[0]
+    if total <= keep:
+        conn.close()
+        return 0
+    c.execute(
+        """DELETE FROM catalog_source_posts
+           WHERE id NOT IN (
+             SELECT id FROM catalog_source_posts
+             ORDER BY COALESCE(posted_at, saved_at) DESC, id DESC
+             LIMIT ?
+           )""",
+        (keep,),
+    )
+    removed = c.rowcount
+    conn.commit()
+    conn.close()
+    mark_orphan_products_out_of_stock()
+    return removed
+
+
+def mark_orphan_products_out_of_stock() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """UPDATE catalog_products
+           SET in_stock = 0
+           WHERE in_stock = 1
+             AND source_message_id IS NOT NULL
+             AND source_message_id NOT IN (
+               SELECT message_id FROM catalog_source_posts WHERE message_id IS NOT NULL
+             )"""
+    )
+    count = c.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+
+def get_source_post_by_message_id(message_id: int) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """SELECT chat_id, message_id, text, photo_file_id, posted_at
+           FROM catalog_source_posts WHERE message_id = ?""",
+        (message_id,),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "chat_id": row[0],
+        "message_id": row[1],
+        "text": row[2],
+        "photo_file_id": row[3],
+        "posted_at": row[4],
+    }
+
+
+def find_newest_price_post() -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """SELECT chat_id, message_id, text, photo_file_id, posted_at
+           FROM catalog_source_posts
+           ORDER BY COALESCE(posted_at, saved_at) DESC, id DESC"""
+    )
+    rows = c.fetchall()
+    conn.close()
+    for row in rows:
+        text = row[2]
+        has_photo = bool(row[3])
+        if is_price_post(text, has_photo=has_photo):
+            return {
+                "chat_id": row[0],
+                "message_id": row[1],
+                "text": row[2],
+                "photo_file_id": row[3],
+                "posted_at": row[4],
+            }
+    return None
+
+
+def find_card_post_for_slug(slug: str) -> Optional[dict]:
+    lookback = getattr(config, "CATALOG_ACTIVE_CARD_LOOKBACK", 20)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """SELECT chat_id, message_id, text, photo_file_id, posted_at
+           FROM catalog_source_posts
+           WHERE photo_file_id IS NOT NULL
+           ORDER BY COALESCE(posted_at, saved_at) DESC, id DESC"""
+    )
+    rows = c.fetchall()
+    conn.close()
+    cards_seen = 0
+    for row in rows:
+        products = parse_catalog_text(row[2])
+        if not products:
+            continue
+        cards_seen += 1
+        if cards_seen > lookback:
+            break
+        for product in products:
+            if _slug_matches(slug, product["slug"]):
+                return {
+                    "chat_id": row[0],
+                    "message_id": row[1],
+                    "text": row[2],
+                    "photo_file_id": row[3],
+                    "posted_at": row[4],
+                    "product": product,
+                }
+    return None
+
+
+def _product_from_card(slug: str, card: dict) -> Optional[dict]:
+    products = parse_catalog_text(card["text"])
+    for product in products:
+        if _slug_matches(slug, product["slug"]):
+            return product
+    cached = card.get("product")
+    if cached and _slug_matches(slug, cached["slug"]):
+        return cached
+    return None
+
+
+def _refresh_cached_posts(limit: int) -> int:
+    rows = _fetch_newest_source_posts(limit)
     scanned = 0
-    imported = 0
-    for chat_id, message_id, text, photo_file_id in rows:
+    for _chat_id, message_id, text, photo_file_id in rows:
         scanned += 1
-        imported += sync_from_text(text=text, photo_file_id=photo_file_id, message_id=message_id)
-        imported += sync_price_post(text=text, message_id=message_id)
-    return scanned, imported
+        sync_from_text(text=text, photo_file_id=photo_file_id, message_id=message_id)
+        sync_price_post(text=text, message_id=message_id)
+    return scanned
+
+
+def _replace_price_overrides_from_post(price_message_id: int, entries: list[dict]) -> int:
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM catalog_price_overrides")
+    count = 0
+    for entry in entries:
+        c.execute(
+            """INSERT INTO catalog_price_overrides (slug, name, prices_json, source_message_id, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                entry["slug"],
+                entry["name"],
+                json.dumps(entry["prices"]),
+                price_message_id,
+                now,
+            ),
+        )
+        count += 1
+    conn.commit()
+    conn.close()
+    return count
+
+
+def sync_catalog_full(limit: Optional[int] = None) -> dict:
+    """
+    Full shop sync for scheduled agents:
+    1) Re-parse newest cached channel posts
+    2) Use newest text-only price post (AVAILABLE list) for prices + assortment
+    3) Follow t.me/c/... links to product cards for description, photo, Available/Unavailable
+    """
+    post_limit = limit if limit is not None else getattr(config, "CATALOG_SYNC_POST_LIMIT", 60)
+    result = {
+        "ok": False,
+        "cache_posts_scanned": 0,
+        "price_message_id": None,
+        "price_items": 0,
+        "cards_linked": 0,
+        "cards_missing": 0,
+        "shop_available": 0,
+        "total_products": 0,
+        "errors": [],
+    }
+
+    result["cache_posts_scanned"] = _refresh_cached_posts(post_limit)
+    price_post = find_newest_price_post()
+    if not price_post:
+        result["errors"].append("No price post found in cache (text-only AVAILABLE post).")
+        prune_source_posts(post_limit)
+        total, available = catalog_stats()
+        result["total_products"] = total
+        result["shop_available"] = available
+        return result
+
+    entries = parse_price_post_entries_with_links(price_post["text"])
+    if not entries:
+        result["errors"].append(f"Could not parse price post (message {price_post['message_id']}).")
+        prune_source_posts(post_limit)
+        total, available = catalog_stats()
+        result["total_products"] = total
+        result["shop_available"] = available
+        return result
+
+    result["price_message_id"] = price_post["message_id"]
+    result["price_items"] = len(entries)
+    _replace_price_overrides_from_post(price_post["message_id"], entries)
+
+    listed_slugs: set[str] = set()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE catalog_products SET in_stock = 0")
+    conn.commit()
+    conn.close()
+
+    for entry in entries:
+        slug = entry["slug"]
+        listed_slugs.add(slug)
+        card = None
+        card_message_id = entry.get("card_message_id")
+        if card_message_id:
+            card = get_source_post_by_message_id(card_message_id)
+            if not card:
+                result["errors"].append(f"Card message {card_message_id} not in cache for {slug}.")
+        if not card:
+            card = find_card_post_for_slug(slug)
+        if card:
+            result["cards_linked"] += 1
+        else:
+            result["cards_missing"] += 1
+
+        product = _product_from_card(slug, card) if card else None
+        in_stock = bool(product and product.get("in_stock"))
+
+        record = {
+            "id": product["id"] if product else _stable_id(slug),
+            "slug": slug,
+            "name": (product or {}).get("name") or entry["name"],
+            "description": (product or {}).get("description") or entry["name"],
+            "in_stock": in_stock,
+            "prices": entry["prices"],
+        }
+        upsert_products(
+            [record],
+            photo_file_id=card.get("photo_file_id") if card else None,
+            message_id=card.get("message_id") if card else None,
+            force_prices=True,
+        )
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if listed_slugs:
+        placeholders = ",".join("?" * len(listed_slugs))
+        c.execute(
+            f"UPDATE catalog_products SET in_stock = 0 WHERE slug NOT IN ({placeholders})",
+            tuple(listed_slugs),
+        )
+    conn.commit()
+    conn.close()
+
+    mark_orphan_products_out_of_stock()
+    prune_source_posts(post_limit)
+
+    total, available = catalog_stats()
+    result["total_products"] = total
+    result["shop_available"] = available
+    result["ok"] = True
+    return result
+
+
+def sync_last_source_posts(limit: int = 30) -> tuple[int, int, int]:
+    """Backward-compatible wrapper around full catalog sync."""
+    result = sync_catalog_full(limit)
+    return (
+        result.get("cache_posts_scanned", 0),
+        result.get("price_items", 0),
+        result.get("price_items", 0),
+    )
 
 
 def get_product_by_id(product_id: int) -> Optional[dict]:
@@ -233,18 +568,39 @@ def _row_to_product(row) -> dict:
     }
 
 
+def _slug_matches(product_slug: str, override_slug: str) -> bool:
+    if product_slug == override_slug:
+        return True
+    if product_slug.startswith(override_slug + "_") or override_slug.startswith(product_slug + "_"):
+        return True
+    if product_slug in override_slug or override_slug in product_slug:
+        return True
+    return False
+
+
 def _get_price_for_slug(slug: str, parsed_prices: Optional[dict]) -> dict:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT prices_json FROM catalog_price_overrides WHERE slug = ?", (slug,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0]:
-        try:
-            raw = json.loads(row[0])
-            return {int(k): float(v) for k, v in raw.items()}
-        except Exception:
-            pass
+    try:
+        c.execute("SELECT prices_json FROM catalog_price_overrides WHERE slug = ?", (slug,))
+        row = c.fetchone()
+        if row and row[0]:
+            try:
+                raw = json.loads(row[0])
+                return {int(k): float(v) for k, v in raw.items()}
+            except Exception:
+                pass
+        c.execute("SELECT slug, prices_json FROM catalog_price_overrides")
+        for override_slug, prices_json in c.fetchall():
+            if not _slug_matches(slug, override_slug):
+                continue
+            try:
+                raw = json.loads(prices_json)
+                return {int(k): float(v) for k, v in raw.items()}
+            except Exception:
+                continue
+    finally:
+        conn.close()
     return parsed_prices or {}
 
 

@@ -3,14 +3,18 @@
 
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Get from @BotFather
-OXAPAY_API_KEY = ""  # Leave empty for testing without crypto payment provider
+OXAPAY_API_KEY = ""  # Merchant API key from OxaPay dashboard
+OXAPAY_SANDBOX = False  # True = test invoices (no real crypto)
+PAYMENT_PROVIDER_TOKEN = ""  # @BotFather → Bot → Payments (Smart Glocal = card, not @wallet)
+PAYMENT_CURRENCY = "USD"  # ISO code for send_invoice (USD, RUB, etc.)
+ENABLE_TELEGRAM_PAY = False  # True = card payments via Smart Glocal; False = crypto only
 
 # Admin Configuration
 ADMIN_USER_ID = 123456789  # Replace with your Telegram user ID
 
 # Bot Settings
 SUPPORT_HANDLE = "@your_support_handle"
-SHOP_IMAGE = "shop_banner.jpg"  # Placeholder image filename
+SHOP_IMAGE = "tetrahydroguild.png"
 CURRENCY = "$"
 
 # Product Configuration
@@ -20,6 +24,12 @@ PRODUCTS = []
 # Private channel ID for stock posts (catalog/channel-cards branch only; bot must be channel admin)
 # Leave None on catalog/inline-buttons branch
 STOCK_CHANNEL_ID = None  # e.g. -1001234567890
+
+# Newest cached channel posts to refresh before applying the latest price list.
+CATALOG_SYNC_POST_LIMIT = 60
+
+# Newest product-card posts in cache used when resolving item links / slugs.
+CATALOG_ACTIVE_CARD_LOOKBACK = 20
 
 DEFAULT_PRICES = {1: 10.0, 5: 45.0, 10: 80.0}
 PRODUCT_PRICES = {

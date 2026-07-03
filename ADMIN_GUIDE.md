@@ -12,9 +12,23 @@ The bot can sync products, prices (from config), and availability from a **priva
 2. Post catalog messages in the format: product title, THC/hybrid lines, description, then `❇️ Available` or `❌ Unavailable` / `❌ Unvailable`.
 3. The bot updates the shop when you **post** or **edit** a channel message (with photo + caption).
 4. For the first import: **forward** a catalog post from the channel to the bot in private chat.
-5. `/sync_catalog` — shows how many products are in the database.
+5. **`/sync_catalog`** — **full shop sync** (same as `/sync_last_60`): refreshes the newest cached channel posts, uses the latest **text-only price post** (`AVAILABLE` + `5g =…`) for prices and assortment, follows `t.me/c/…` links to **product cards** (photo) for description, photo, and `❇️ Available` / `❌ Unavailable`.
+6. **`/sync_last_30`** / **`/sync_last_60`** — same full sync with a smaller or larger cache window (`CATALOG_SYNC_POST_LIMIT`, default `60`; `CATALOG_ACTIVE_CARD_LOOKBACK`, default `20` catalog cards).
 
-Prices per strain are set in `config.py` → `PRODUCT_PRICES` (key = slug from product name). Shop shows only **Available** items.
+**Scheduled sync (cron / agent):**
+
+```bash
+cd /path/to/telegram-ecommerce-python-bot
+.venv/bin/python sync_catalog_cli.py --limit 60
+```
+
+The bot must already have cached channel posts (admin in the stock channel). Forward the latest price post or any missing cards to the bot if the CLI reports `Cards missing from cache`.
+
+New channel posts are synced automatically when the bot is channel admin. Forward a post to the bot in private chat to import a single message.
+
+Prices for quantity buttons come from **price posts** in the channel (matched by product name/slug). Shop shows only **Available** items.
+
+Admin-only commands are hidden from other users in the Telegram menu (set on bot startup).
 
 ## Admin Panel Features
 
