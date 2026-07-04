@@ -62,6 +62,7 @@ ADMIN_BOT_COMMANDS = [
     BotCommand("start", "Main menu"),
     BotCommand("orders", "Recent orders"),
     BotCommand("export_orders", "Export orders CSV"),
+    BotCommand("addcode", "Add discount code"),
     BotCommand("create_giveaway", "Create giveaway"),
     BotCommand("list_giveaways", "List giveaways"),
     BotCommand("view_entries", "Giveaway entries"),
@@ -111,10 +112,49 @@ def get_cart_subtotal(user_data: dict) -> float:
 
 
 def reset_cart_discount(user_data: dict) -> None:
+    """Clear promo discount fields. Keeps cart_referred_by (set via /start or referral code)."""
     user_data["cart_price"] = None
     user_data["cart_discount_code"] = None
     user_data["cart_discount_percent"] = 0
-    user_data["cart_referred_by"] = None
+
+
+def get_effective_discount(user_data: dict) -> tuple:
+    """Return (code, percent). Promo codes win; otherwise referral gives 10%."""
+    code = user_data.get("cart_discount_code")
+    percent = int(user_data.get("cart_discount_percent", 0) or 0)
+    if percent > 0:
+        return code, percent
+    referred_by = user_data.get("cart_referred_by")
+    if referred_by:
+        return generate_referral_code(referred_by), 10
+    return None, 0
+
+
+def get_cart_total(user_data: dict) -> float:
+    subtotal = get_cart_subtotal(user_data)
+    _, percent = get_effective_discount(user_data)
+    if percent:
+        return round(subtotal * (1 - percent / 100), 2)
+    return subtotal
+
+
+def apply_discount_to_cart(user_data: dict, code: str, percent: int) -> float:
+    user_data["cart_discount_code"] = code
+    user_data["cart_discount_percent"] = int(percent)
+    total = get_cart_total(user_data)
+    user_data["cart_price"] = total
+    return total
+
+
+def sync_cart_price(user_data: dict) -> float:
+    """Persist effective total onto cart_price for payment handlers."""
+    code, percent = get_effective_discount(user_data)
+    if percent and not user_data.get("cart_discount_percent"):
+        user_data["cart_discount_code"] = code
+        user_data["cart_discount_percent"] = percent
+    total = get_cart_total(user_data)
+    user_data["cart_price"] = total
+    return total
 
 
 def extract_leading_emoji(name: str) -> str:
@@ -166,12 +206,8 @@ def strip_trailing_separator_lines(text: str) -> str:
 
 def build_cart_items_message(user_data: dict) -> str:
     cart_items = get_cart_items(user_data)
-    discount_code = user_data.get("cart_discount_code")
-    discount_percent = user_data.get("cart_discount_percent", 0)
-    subtotal = get_cart_subtotal(user_data)
-    total = subtotal
-    if discount_percent:
-        total = round(subtotal * (1 - discount_percent / 100), 2)
+    discount_code, discount_percent = get_effective_discount(user_data)
+    total = get_cart_total(user_data)
     lines = ["Cart:", ""]
     for idx, item in enumerate(cart_items, start=1):
         lines.extend(format_cart_item_block(idx, item))
@@ -194,8 +230,7 @@ def build_cart_delivery_message() -> str:
 
 def build_checkout_review_message(user_data: dict, total: float) -> str:
     cart_items = get_cart_items(user_data)
-    discount_code = user_data.get("cart_discount_code")
-    discount_percent = user_data.get("cart_discount_percent", 0)
+    discount_code, discount_percent = get_effective_discount(user_data)
     amount = format_price(total)
     lines = [
         "Let's check your order before confirmation",
@@ -302,11 +337,17 @@ def build_cart_delivery_keyboard(user_data: dict) -> InlineKeyboardMarkup:
     phone = user_data.get("cart_phone")
     address_btn_text = "Location ✅" if address else "Set Location"
     phone_btn_text = "Phone ✅" if phone else "Set Phone"
+    _, discount_percent = get_effective_discount(user_data)
+    if discount_percent:
+        discount_btn_text = f"Discount ✅ {discount_percent}%"
+    else:
+        discount_btn_text = "Apply Discount Code"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(address_btn_text, callback_data="enter_address"),
             InlineKeyboardButton(phone_btn_text, callback_data="enter_phone"),
         ],
+        [InlineKeyboardButton(discount_btn_text, callback_data="enter_discount")],
         [InlineKeyboardButton("Checkout", callback_data="checkout")],
         [InlineKeyboardButton("Back", callback_data="menu_shop"), InlineKeyboardButton("Main Menu", callback_data="main_menu")],
     ])
@@ -394,6 +435,7 @@ async def send_shop_header(chat) -> None:
 async def send_phone_prompt(chat, user_data: dict) -> None:
     user_data["awaiting_phone"] = True
     user_data["awaiting_address"] = False
+    user_data["awaiting_discount"] = False
     await chat.send_message(
         "Please share your phone number for delivery.\n"
         "Tap the button below or type your number.",
@@ -404,6 +446,7 @@ async def send_phone_prompt(chat, user_data: dict) -> None:
 async def send_location_prompt(chat, user_data: dict, update: Update) -> None:
     user_data["awaiting_address"] = True
     user_data["awaiting_phone"] = False
+    user_data["awaiting_discount"] = False
     show_gps = should_offer_gps_reply_keyboard(user_data, update)
     text = build_location_prompt_text(show_gps)
     reply_markup = build_location_reply_keyboard() if show_gps else None
@@ -932,6 +975,8 @@ def clear_cart_after_payment(user_data: dict) -> None:
         "cart_address",
         "cart_phone",
         "awaiting_phone",
+        "awaiting_address",
+        "awaiting_discount",
         "cart_items_message_id",
         "cart_delivery_message_id",
         "cart_chat_id",
@@ -979,6 +1024,7 @@ def build_main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("Shop", callback_data="menu_shop")],
         [InlineKeyboardButton("Cart", callback_data="open_cart")],
+        [InlineKeyboardButton("Refer a Friend", callback_data="menu_referral")],
         [InlineKeyboardButton("Support", callback_data="menu_support")],
     ]
     if is_admin:
@@ -986,11 +1032,29 @@ def build_main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def apply_start_referral(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """If /start was opened with a REF code, store referrer for this session."""
+    if not context.args:
+        return
+    ref_code = str(context.args[0]).strip().upper()
+    referrer = get_referrer_from_code(ref_code)
+    if referrer is None or referrer == user_id:
+        return
+    context.user_data["cart_referred_by"] = referrer
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    apply_start_referral(context, user_id)
     is_admin = user_id == ADMIN_USER_ID
     reply_markup = build_main_menu_keyboard(is_admin)
     text = "Welcome to the shop!\n\nPlease choose an option:"
+    if context.user_data.get("cart_referred_by") and update.message and context.args:
+        text = (
+            "Welcome to the shop!\n\n"
+            "Referral applied — you get 10% off at checkout.\n\n"
+            "Please choose an option:"
+        )
 
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup)
@@ -1081,6 +1145,24 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Active Giveaways:", reply_markup=reply_markup)
     elif data == "menu_support":
         await query.edit_message_text(f"For support, contact: {config.SUPPORT_HANDLE}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]))
+    elif data == "menu_referral":
+        code = generate_referral_code(user_id)
+        bot_username = context.bot.username
+        share_link = f"https://t.me/{bot_username}?start={code}" if bot_username else code
+        message = (
+            "<b>Refer a Friend</b>\n\n"
+            f"Your referral code: <code>{html.escape(code)}</code>\n\n"
+            "Share this link with friends:\n"
+            f"{html.escape(share_link)}\n\n"
+            "When they open the bot with your link (or apply your code in Cart → Apply Discount Code), "
+            "they get <b>10% off</b> and you are credited as their referrer."
+        )
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
     elif data == "main_menu":
         await start(update, context)
     else:
@@ -1414,15 +1496,26 @@ async def cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_data = context.user_data
     if data == "enter_address":
+        user_data["awaiting_discount"] = False
         await send_location_prompt(query.message.chat, user_data, update)
     elif data == "enter_phone":
+        user_data["awaiting_discount"] = False
         await send_phone_prompt(query.message.chat, user_data)
+    elif data == "enter_discount":
+        user_data["awaiting_discount"] = True
+        user_data["awaiting_address"] = False
+        user_data["awaiting_phone"] = False
+        await query.message.chat.send_message(
+            "Send your discount or referral code now.\n"
+            "Example: SUMMER20 or REF123456789"
+        )
     elif data == "show_location_keyboard":
         if is_desktop_or_web_telegram(update):
             await query.answer("On desktop/web use 📎 or paste a Google Maps link.", show_alert=True)
             return
         user_data["awaiting_address"] = True
         user_data["awaiting_phone"] = False
+        user_data["awaiting_discount"] = False
         await query.message.chat.send_message(
             build_location_prompt_text(True),
             reply_markup=build_location_reply_keyboard(),
@@ -1435,8 +1528,80 @@ async def cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "main_menu":
         await start(update, context)
 
+
+async def _handle_discount_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Process text while awaiting a discount/referral code. Returns True if handled."""
+    user_data = context.user_data
+    if not user_data.get("awaiting_discount"):
+        return False
+    user_data["awaiting_discount"] = False
+    code = (update.message.text or "").strip().upper()
+    if not code:
+        await update.message.reply_text("Please send a valid discount code.")
+        return True
+
+    discount = get_discount_code(code)
+    if discount:
+        total = apply_discount_to_cart(user_data, discount["code"], discount["percent"])
+        await update.message.reply_text(
+            f"Discount applied: {discount['percent']}% off ({discount['code']}).\n"
+            f"New total: {format_price(total)}"
+        )
+        await show_cart(update, context, refresh_at_bottom=True)
+        return True
+
+    referrer = get_referrer_from_code(code)
+    if referrer is not None:
+        if referrer == update.effective_user.id:
+            await update.message.reply_text("You cannot use your own referral code.")
+            return True
+        user_data["cart_referred_by"] = referrer
+        total = apply_discount_to_cart(user_data, code, 10)
+        await update.message.reply_text(
+            f"Referral code applied: 10% off.\nNew total: {format_price(total)}"
+        )
+        await show_cart(update, context, refresh_at_bottom=True)
+        return True
+
+    await update.message.reply_text("Invalid or expired discount code.")
+    return True
+
+
+async def _handle_admin_discount_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Process admin interactive discount creation. Returns True if handled."""
+    user_data = context.user_data
+    if update.effective_user.id != ADMIN_USER_ID or not user_data.get("awaiting_admin_discount"):
+        return False
+    parts = (update.message.text or "").strip().split()
+    if len(parts) < 3:
+        await update.message.reply_text(
+            "Format: CODE PERCENT YYYY-MM-DD\nExample: SUMMER20 20 2026-12-31"
+        )
+        return True
+    code, percent_raw, expires = parts[0], parts[1], parts[2]
+    try:
+        percent = int(percent_raw)
+        date.fromisoformat(expires)
+    except Exception:
+        await update.message.reply_text("Invalid percent or date format (use YYYY-MM-DD).")
+        return True
+    if percent <= 0 or percent > 100:
+        await update.message.reply_text("Percent must be between 1 and 100.")
+        return True
+    add_discount_code(code, percent, expires)
+    user_data["awaiting_admin_discount"] = False
+    await update.message.reply_text(
+        f"Discount code {code.upper()} for {percent}% off until {expires} added."
+    )
+    return True
+
+
 async def address_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
+    if await _handle_discount_code_message(update, context):
+        return
+    if await _handle_admin_discount_message(update, context):
+        return
     if user_data.get("awaiting_phone"):
         phone = update.message.text.strip()
         digits = re.sub(r"\D", "", phone)
@@ -1504,10 +1669,7 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_empty_cart_keyboard(),
         )
         return
-    subtotal = get_cart_subtotal(user_data)
-    price = user_data.get("cart_price")
-    if price is None:
-        price = subtotal
+    price = sync_cart_price(user_data)
     address = user_data.get("cart_address")
     if not address:
         user_data["awaiting_address"] = True
@@ -1594,8 +1756,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_to_cart":
         context.user_data["awaiting_address"] = False
         context.user_data["awaiting_phone"] = False
+        context.user_data["awaiting_discount"] = False
         await show_cart(update, context)
-    elif data in ["enter_address", "enter_phone", "checkout", "show_location_keyboard"]:
+    elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
         await cart_handler(update, context)
     elif data == "pay_telegram":
         await query.answer()
@@ -1604,9 +1767,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cart_items:
             await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
             return
-        price = user_data.get("cart_price")
-        if price is None:
-            price = get_cart_subtotal(user_data)
+        price = sync_cart_price(user_data)
         await start_telegram_payment(
             context,
             query.message.chat,
@@ -1622,9 +1783,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cart_items:
             await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
             return
-        price = user_data.get("cart_price")
-        if price is None:
-            price = get_cart_subtotal(user_data)
+        price = sync_cart_price(user_data)
         await start_crypto_payment(
             context,
             query.message.chat,
@@ -1694,8 +1853,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_giveaways":
         await admin_giveaways_handler(update, context)
     elif data == "admin_discount":
-        await query.answer("Discount codes are managed via /addcode only.", show_alert=True)
-        await admin_panel_handler(update, context)
+        await admin_discount_handler(update, context)
     elif data == "admin_stats":
         await admin_stats_handler(update, context)
     elif data == "admin_broadcast":
@@ -1899,15 +2057,42 @@ async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     await query.answer()
-    
+    context.user_data["awaiting_admin_discount"] = False
+
     keyboard = [
         [InlineKeyboardButton("View Orders", callback_data="admin_orders")],
         [InlineKeyboardButton("Manage Giveaways", callback_data="admin_giveaways")],
+        [InlineKeyboardButton("Add Discount Code", callback_data="admin_discount")],
         [InlineKeyboardButton("Bot Statistics", callback_data="admin_stats")],
         [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text("Admin Panel\n\nSelect an option to manage your bot:", reply_markup=reply_markup)
+
+
+async def admin_discount_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if user_id != ADMIN_USER_ID:
+        await query.edit_message_text("You are not authorized to add discount codes.")
+        return
+    await query.answer()
+    context.user_data["awaiting_admin_discount"] = True
+    message = (
+        "<b>Add Discount Code</b>\n\n"
+        "Send a message in this format:\n"
+        "<code>CODE PERCENT YYYY-MM-DD</code>\n\n"
+        "Example: <code>SUMMER20 20 2026-12-31</code>\n\n"
+        "Or use the command:\n"
+        "<code>/addcode CODE PERCENT YYYY-MM-DD</code>"
+    )
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Back to Admin Panel", callback_data="admin_panel")]]
+        ),
+        parse_mode="HTML",
+    )
 
 async def admin_orders_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query

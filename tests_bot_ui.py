@@ -10,23 +10,23 @@ def _button_labels(markup) -> list[str]:
     return [btn.text for row in markup.inline_keyboard for btn in row]
 
 
-def test_start_menu_no_referral():
+def test_start_menu_has_referral():
     for is_admin in (False, True):
         labels = _button_labels(bot.build_main_menu_keyboard(is_admin))
-        assert "Refer a Friend" not in labels
+        assert "Refer a Friend" in labels
         assert "Apply Discount Code" not in labels
         if is_admin:
             assert "Admin Panel" in labels
-    print("OK main menu: no Refer a Friend / discount buttons")
+    print("OK main menu: Refer a Friend present")
 
 
-def test_cart_keyboard_no_discount():
+def test_cart_keyboard_has_discount():
     delivery_labels = _button_labels(bot.build_cart_delivery_keyboard({}))
-    assert "Apply Discount Code" not in delivery_labels
+    assert "Apply Discount Code" in delivery_labels
     assert "Checkout" in delivery_labels
     assert "Set Location" in delivery_labels
     assert "Set Phone" in delivery_labels
-    print("OK cart: no Apply Discount Code")
+    print("OK cart: Apply Discount Code present")
 
 
 def test_empty_cart_restore():
@@ -63,23 +63,23 @@ def test_oxapay_helpers_present():
     print("OK bot.py: OxaPay crypto payment integrated")
 
 
-def test_admin_panel_no_add_discount_button():
+def test_admin_panel_has_add_discount_button():
     source = Path("bot.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     fn = next(
         n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "admin_panel_handler"
     )
     fn_src = ast.get_source_segment(source, fn) or ""
-    assert "Add Discount Code" not in fn_src
-    assert "admin_discount" not in fn_src
-    assert "Refer a Friend" not in source
-    print("OK admin panel: no Add Discount Code button")
+    assert "Add Discount Code" in fn_src
+    assert "admin_discount" in fn_src
+    assert "Refer a Friend" in source
+    print("OK admin panel: Add Discount Code button present")
 
 
-def test_admin_commands_no_addcode_menu():
+def test_admin_commands_has_addcode_menu():
     names = [c.command for c in bot.ADMIN_BOT_COMMANDS]
-    assert "addcode" not in names
-    print("OK admin command menu: no addcode shortcut")
+    assert "addcode" in names
+    print("OK admin command menu: addcode shortcut present")
 
 
 def test_telegram_pay_handlers_registered():
@@ -90,17 +90,38 @@ def test_telegram_pay_handlers_registered():
     print("OK bot.py: Telegram Pay handlers registered")
 
 
+def test_referral_and_discount_helpers():
+    assert bot.generate_referral_code(42) == "REF42"
+    assert bot.get_referrer_from_code("REF42") == 42
+    assert bot.get_referrer_from_code("SUMMER20") is None
+
+    user_data = {
+        "cart_items": [{"line_price": 100.0}],
+        "cart_referred_by": 99,
+    }
+    code, percent = bot.get_effective_discount(user_data)
+    assert percent == 10
+    assert code == "REF99"
+    assert bot.get_cart_total(user_data) == 90.0
+
+    bot.apply_discount_to_cart(user_data, "SUMMER20", 20)
+    assert user_data["cart_discount_percent"] == 20
+    assert user_data["cart_price"] == 80.0
+    print("OK referral/discount pricing helpers")
+
+
 def main() -> int:
     tests = [
-        test_start_menu_no_referral,
-        test_cart_keyboard_no_discount,
+        test_start_menu_has_referral,
+        test_cart_keyboard_has_discount,
         test_empty_cart_restore,
         test_checkout_location_keyboard,
         test_checkout_handler_sends_new_message,
         test_oxapay_helpers_present,
         test_telegram_pay_handlers_registered,
-        test_admin_panel_no_add_discount_button,
-        test_admin_commands_no_addcode_menu,
+        test_admin_panel_has_add_discount_button,
+        test_admin_commands_has_addcode_menu,
+        test_referral_and_discount_helpers,
     ]
     failed = 0
     for t in tests:
