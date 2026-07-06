@@ -6,14 +6,16 @@ Only you can access the admin panel and commands.
 
 ## Stock channel catalog
 
-The bot can sync products, prices (from config), and availability from a **private Telegram channel**.
+There are **no product files** in the repo. Products, prices, and availability come from a **private Telegram channel** (`STOCK_CHANNEL_ID` in `.env`).
 
-1. Add the bot to channel `-1002277323115` as **admin** (required for private channels).
+1. Add the bot to your private stock channel as **admin** (required for private channels).
 2. Post catalog messages in the format: product title, THC/hybrid lines, description, then `❇️ Available` or `❌ Unavailable` / `❌ Unvailable`.
 3. The bot updates the shop when you **post** or **edit** a channel message (with photo + caption).
 4. For the first import: **forward** a catalog post from the channel to the bot in private chat.
 5. **`/sync_catalog`** — **full shop sync** (same as `/sync_last_60`): refreshes the newest cached channel posts, uses the latest **text-only price post** (`AVAILABLE` + `5g =…`) for prices and assortment, follows `t.me/c/…` links to **product cards** (photo) for description, photo, and `❇️ Available` / `❌ Unavailable`.
 6. **`/sync_last_30`** / **`/sync_last_60`** — same full sync with a smaller or larger cache window (`CATALOG_SYNC_POST_LIMIT`, default `60`; `CATALOG_ACTIVE_CARD_LOOKBACK`, default `20` catalog cards).
+
+**Payment is not connected yet** (`ENABLE_PAYMENTS=false`). Users can browse cards and manage the cart only.
 
 **Scheduled sync (cron / agent):**
 

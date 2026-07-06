@@ -1,6 +1,7 @@
-# Configuration files with sensitive data
-config.py
+# Secrets live in .env only (config.py is committed and loads from .env)
 config.py.bak
+.env.backup*
+.env.backup.*
 
 # Database files (may contain sensitive data)
 *.db

@@ -1,259 +1,146 @@
-# Automated Ecommerce Bot - Telegram
+# Telegram Ecommerce Bot (Catalog + Cart)
 
-A comprehensive Telegram bot for managing an automated ecommerce shop with advanced features including order management, giveaways, discount codes, and payment processing.
+Python Telegram shop bot. **Active features:** catalog cards synced from a **private Telegram channel**, and a **cart** with remove buttons. Payment and other checkout flows are **not connected yet**.
 
 **Repository:** [github.com/wrogg/telegram-ecommerce-python-bot](https://github.com/wrogg/telegram-ecommerce-python-bot)
 
-## Catalog variants (branches)
+## Why a fresh GitHub clone used to fail
 
-This project has two catalog modes on separate branches:
+GitHub only stores code — it does not run the bot. Older `main` also:
 
-| Branch | Mode |
-|--------|------|
-| [`catalog/inline-buttons`](BRANCHES.md) | Products as inline menu buttons (`config.PRODUCTS`) |
-| [`catalog/channel-cards`](BRANCHES.md) | Product cards synced from a private Telegram channel |
+1. **Did not ship `config.py`** (it was gitignored), so `import config` crashed after clone.
+2. **Expected static product files / `PRODUCTS` in config**, which are not used anymore.
+3. **Did not include catalog modules** (`catalog_store.py`, `catalog_parser.py`) on the published tree until this branch is pushed.
 
-See **[BRANCHES.md](BRANCHES.md)** for descriptions and how to fork/switch branches.
+This tree fixes that: `config.py` is committed (no secrets), loads `.env`, and the shop reads products from the private channel only.
 
-## Run 24/7
+## Requirements
 
-GitHub stores the code only. For a bot that runs around the clock, deploy to Render, Railway, or a VPS — see **[DEPLOY.md](DEPLOY.md)**.
+- Python 3.10+
+- Bot token from [@BotFather](https://t.me/BotFather)
+- A **private Telegram channel** for the catalog (bot must be **admin**)
 
-## Features
+## New bot via BotFather
 
-### Shopping System
-- **Product Catalog**: Browse products with quantity-based pricing
-- **Shopping Cart**: Add items and manage quantities
-- **Address Collection**: Secure shipping address input
-- **Discount Codes**: Apply promotional codes for savings
-- **Payment Processing**: Integrated crypto payment provider such as Oxapay
+New bot: [@TetraHydroGuild_bot](https://t.me/TetraHydroGuild_bot). Replacing [@streettrader_bot](https://t.me/streettrader_bot)? See **[NEW_BOT_SETUP.md](NEW_BOT_SETUP.md)** (Russian): paste `TELEGRAM_BOT_TOKEN` from @BotFather into `.env` → stop @streettrader_bot → add @TetraHydroGuild_bot as channel admin → `./run.sh`. Template: `.env.newbot.example`.
 
-### Giveaway System
-- **Create Giveaways**: Admin can create promotional giveaways
-- **User Participation**: One-click entry system
-- **Entry Tracking**: Automatic validation and limits
-- **Winner Selection**: Random winner selection with transparency
+## Quick start (local)
 
-### Discount & Referral System
-- **Discount Codes**: Admin-managed promotional codes
-- **Referral System**: User-generated referral codes with 10% discount
-- **Code Validation**: Automatic expiration and usage tracking
-
-### Admin Panel
-- **Order Management**: View and export order data
-- **Revenue Tracking**: Comprehensive sales analytics
-- **Giveaway Management**: Create and monitor giveaways
-- **User Analytics**: Customer behavior insights
-- **Broadcast Messages**: Send announcements to all users
-
-### Security Features
-- **Admin Authentication**: User ID-based admin access
-- **Input Validation**: Sanitized user inputs
-- **Database Security**: SQL injection prevention
-- **Error Handling**: Comprehensive error management
-
-## Technical Stack
-
-- **Language**: Python 3.10+
-- **Framework**: python-telegram-bot 20+
-- **Database**: SQLite with automatic schema creation
-- **Payment**: Crypto payment provider API integration
-- **Architecture**: Event-driven with async/await
-
-## Installation
-
-### Prerequisites
-- Python 3.10 or higher
-- Telegram Bot Token (from @BotFather)
-- Crypto Payment Provider API Key (optional, for payment processing)
-
-### Setup Instructions
-
-1. **Clone the repository** (pick a branch — see [BRANCHES.md](BRANCHES.md))
-   ```bash
-   git clone https://github.com/wrogg/telegram-ecommerce-python-bot.git
-   cd telegram-ecommerce-python-bot
-   git checkout catalog/channel-cards   # or catalog/inline-buttons
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure the bot**
-   - Copy `config.example.py` to `config.py`
-   - Update `config.py` with your settings:
-     ```python
-     TELEGRAM_BOT_TOKEN = "your_bot_token_here"
-     OXAPAY_API_KEY = "your_crypto_payment_api_key"  # Optional
-     ADMIN_USER_ID = 123456789  # Your Telegram user ID
-     ```
-
-4. **Customize products**
-   - Edit the `PRODUCTS` list in `config.py`
-   - Add your product images to the project directory
-   - Update product details, prices, and descriptions
-
-5. **Run the bot**
-   ```bash
-   ./run.sh
-   ```
-   Or see [DEPLOY.md](DEPLOY.md) for 24/7 hosting.
-
-## Configuration
-
-### Environment Variables
-- `TELEGRAM_BOT_TOKEN`: Your Telegram bot token
-- `OXAPAY_API_KEY`: Crypto payment provider API key for payments
-- `ADMIN_USER_ID`: Your Telegram user ID for admin access
-
-### Product Configuration
-```python
-PRODUCTS = [
-    {
-        "id": 1,
-        "name": "Product Name",
-        "description": "Product description",
-        "prices": {1: 10.0, 5: 45.0, 10: 80.0},  # Quantity: Price
-        "image": "product_image.jpg"
-    }
-]
-```
-
-## Database Schema
-
-### Orders Table
-- `id`: Primary key
-- `timestamp`: Order timestamp
-- `user_id`: Customer Telegram ID
-- `product_id`: Product identifier
-- `product_name`: Product name
-- `quantity`: Order quantity
-- `price`: Total price
-- `invoice_id`: Payment invoice ID
-- `discount_code`: Applied discount code
-- `discount_percent`: Discount percentage
-- `referred_by`: Referral code used
-- `address`: Shipping address
-
-### Discount Codes Table
-- `code`: Discount code
-- `percent`: Discount percentage
-- `expires`: Expiration date
-
-### Giveaways Table
-- `id`: Giveaway ID
-- `title`: Giveaway title
-- `description`: Giveaway description
-- `prize`: Prize description
-- `start_date`: Start date
-- `end_date`: End date
-- `max_entries`: Maximum entries allowed
-- `is_active`: Active status
-
-## Admin Commands
-
-### Order Management
-- `/orders` - View recent orders
-- `/export_orders` - Export orders to CSV
-
-### Giveaway Management
-- `/create_giveaway TITLE DESCRIPTION PRIZE START_DATE END_DATE [MAX_ENTRIES]`
-- `/list_giveaways` - View active giveaways
-- `/view_entries GIVEAWAY_ID` - View giveaway entries
-
-### Discount Management
-- `/addcode CODE PERCENT YYYY-MM-DD` - Add discount code
-
-### System Status
-- `/bot_status` - Get comprehensive bot status
-
-## User Features
-
-### Shopping Experience
-1. Start the bot with `/start`
-2. Browse products from the main menu
-3. Select product and quantity
-4. Add to cart
-5. Enter shipping address
-6. Apply discount codes (optional)
-7. Complete payment via crypto payment provider
-
-### Giveaway Participation
-1. View active giveaways
-2. Click "Enter Giveaway" button
-3. Automatic entry validation
-4. Real-time entry tracking
-
-### Referral System
-1. Generate personal referral code
-2. Share code with others
-3. Both parties receive 10% discount
-
-## Security Considerations
-
-### Data Protection
-- All user data is stored locally in SQLite database
-- No sensitive data is transmitted to third parties
-- Admin access is restricted to specific user IDs
-
-### Payment Security
-- Crypto payment provider handles all payment processing
-- No payment data is stored locally
-- Secure API communication with payment provider
-
-### Input Validation
-- All user inputs are sanitized
-- SQL injection prevention
-- Rate limiting on admin commands
-
-## Deployment
-
-### Local Development
 ```bash
-python bot.py
+git clone https://github.com/wrogg/telegram-ecommerce-python-bot.git
+cd telegram-ecommerce-python-bot
+
+# Use the branch that has channel catalog + cart (main)
+# git checkout main
+
+cp .env.example .env
+# Edit .env: TELEGRAM_BOT_TOKEN, STOCK_CHANNEL_ID, ADMIN_USER_ID
+
+./run.sh
+# or: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python bot.py
 ```
 
-### Production Deployment
-1. Use a VPS or cloud service
-2. Set up process manager (PM2, Supervisor)
-3. Configure SSL certificates
-4. Set up automated backups
-5. Monitor bot performance
+Open the bot in Telegram → `/start` → **Shop** / **Cart**.
 
-### Docker Deployment
-```dockerfile
-FROM python:3.10-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-CMD ["python", "bot.py"]
+### Required `.env` variables
+
+| Variable | Purpose |
+|----------|---------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `STOCK_CHANNEL_ID` | Private channel ID, e.g. `-1001234567890` |
+| `ADMIN_USER_ID` | Your numeric Telegram user ID (admin commands) |
+
+Optional: `SUPPORT_HANDLE`, `CURRENCY`, `CATALOG_SYNC_POST_LIMIT`, `CATALOG_ACTIVE_CARD_LOOKBACK`.
+
+Payment-related vars (`ENABLE_PAYMENTS`, OxaPay, Telegram Pay) stay **off** — leave `ENABLE_PAYMENTS=false`.
+
+## Catalog from a private channel
+
+There are **no product files** in the repo. The shop is filled from channel posts.
+
+### Setup
+
+1. Create a **private** channel.
+2. Add the bot as **administrator** (needed so the bot receives channel posts).
+3. Put the channel ID in `.env` as `STOCK_CHANNEL_ID` (forward a post to [@userinfobot](https://t.me/userinfobot), or check bot logs).
+4. Post catalog messages (formats below).
+5. While the bot is running, new/edited channel posts are ingested automatically.
+6. For the first import, **forward** catalog posts from the channel to the bot in private chat (admin only).
+7. Admin: `/sync_catalog` (or `/sync_last_60`) to rebuild the shop from the newest cached posts.
+
+### Product card post (photo + caption)
+
+Caption example:
+
+```text
+🦜 TROPICAL BLUES
+🧪 THC 22%
+🧬 Hybrid
+
+Sweet tropical notes.
+
+❇️ Available
 ```
 
-## Contributing
+- End with `❇️ Available` or `❌ Unavailable` (typo `❌ Unvailable` is accepted).
+- Photo is optional but recommended (shown on the shop card).
+- Prices can be on the card (`5g = 45`, `10g = 80`) **or** on a separate price list post.
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+### Price list post (text only, no photo)
+
+Often titled `AVAILABLE`, with one product per block and optional links to cards:
+
+```text
+AVAILABLE
+
+🦜 TROPICAL BLUES
+5g = 45
+10g = 80
+https://t.me/c/1234567890/42
+
+🌸 ANOTHER STRAIN
+5g = 50
+10g = 90
+https://t.me/c/1234567890/43
+```
+
+- `Ng = price` lines set quantity buttons on cards.
+- `1g` in the shop is derived as **5g price / 5** when a 5g price exists.
+- `t.me/c/...` links attach each price row to its product card (photo + description + availability).
+
+Only **Available** items appear in **Shop**, as cards with price buttons. Tap a price to add to cart.
+
+### Admin sync commands
+
+| Command | Action |
+|---------|--------|
+| `/sync_catalog` | Full sync from newest cached posts |
+| `/sync_last_30` / `/sync_last_60` | Same, with a fixed cache window |
+
+CLI (cron): ` .venv/bin/python sync_catalog_cli.py --limit 60`
+
+## Cart
+
+- **Cart** shows a numbered list of selected items and the total.
+- Inline buttons like `1) 🦜=❌` remove that line item.
+- Payment / delivery / discounts are **not connected** yet (footer explains this).
+
+## Project layout
+
+| File | Role |
+|------|------|
+| `bot.py` | Handlers, shop UI, cart |
+| `catalog_parser.py` | Parse channel card + price posts |
+| `catalog_store.py` | SQLite catalog cache |
+| `config.py` | Loads `.env` (no secrets in git) |
+| `.env.example` | Template for secrets |
+| `run.sh` | Create venv, install deps, run bot |
+| `orders.db` | Local SQLite (created at runtime, not in git) |
+
+## Deploy 24/7
+
+GitHub does not host a running bot. Use Render, Railway, or a VPS — see [DEPLOY.md](DEPLOY.md). Set the same env vars there.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For technical support or questions:
-- Create an issue on GitHub
-- Contact: [Your Contact Information]
-
-## Disclaimer
-
-This bot is for educational and demonstration purposes. Ensure compliance with local regulations regarding ecommerce operations and payment processing.
-
----
-
-**Built with clean code and modern design principles** 
+MIT — see [LICENSE](LICENSE).

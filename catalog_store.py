@@ -2,7 +2,7 @@
 import json
 import sqlite3
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import config
 from catalog_parser import (
@@ -323,6 +323,43 @@ def find_newest_price_post() -> Optional[dict]:
     return None
 
 
+def resolve_card_for_entry(entry: dict) -> Tuple[Optional[dict], Optional[str]]:
+    """Resolve product card by t.me/c/… message id, falling back to slug search."""
+    slug = entry.get("slug") or ""
+    card_message_id = entry.get("card_message_id")
+    if card_message_id:
+        card = get_source_post_by_message_id(card_message_id)
+        if card:
+            return card, None
+        fallback = find_card_post_for_slug(slug)
+        if fallback:
+            return fallback, f"Card message {card_message_id} not in cache; matched slug {slug}."
+        return None, f"Card message {card_message_id} not in cache for {slug}."
+
+    fallback = find_card_post_for_slug(slug)
+    if fallback:
+        return fallback, f"No t.me/c/… link for {entry.get('name') or slug}; matched by slug."
+    return None, f"No t.me/c/… link for {entry.get('name') or slug}."
+
+
+def ensure_catalog_synced(limit: Optional[int] = None) -> dict:
+    """Run full catalog sync when the shop is empty but cached channel posts exist."""
+    post_limit = limit if limit is not None else getattr(config, "CATALOG_SYNC_POST_LIMIT", 60)
+    available = catalog_stats()[1]
+    if available > 0:
+        return {"ok": True, "skipped": True, "shop_available": available}
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM catalog_source_posts")
+    cached_posts = c.fetchone()[0]
+    conn.close()
+    if cached_posts == 0:
+        return {"ok": False, "skipped": True, "reason": "no_cached_posts", "shop_available": 0}
+
+    return sync_catalog_full(limit=post_limit)
+
+
 def find_card_post_for_slug(slug: str) -> Optional[dict]:
     lookback = getattr(config, "CATALOG_ACTIVE_CARD_LOOKBACK", 20)
     conn = sqlite3.connect(DB_PATH)
@@ -454,34 +491,38 @@ def sync_catalog_full(limit: Optional[int] = None) -> dict:
     for entry in entries:
         slug = entry["slug"]
         listed_slugs.add(slug)
-        card = None
-        card_message_id = entry.get("card_message_id")
-        if card_message_id:
-            card = get_source_post_by_message_id(card_message_id)
-            if not card:
-                result["errors"].append(f"Card message {card_message_id} not in cache for {slug}.")
+        card, card_error = resolve_card_for_entry(entry)
         if not card:
-            card = find_card_post_for_slug(slug)
-        if card:
-            result["cards_linked"] += 1
-        else:
             result["cards_missing"] += 1
+            if card_error:
+                result["errors"].append(card_error)
+            continue
+        if card_error:
+            result["errors"].append(card_error)
 
-        product = _product_from_card(slug, card) if card else None
-        in_stock = bool(product and product.get("in_stock"))
+        product = _product_from_card(slug, card)
+        if not product:
+            result["cards_missing"] += 1
+            result["errors"].append(
+                f"Could not parse card message {card.get('message_id')} for {slug}."
+            )
+            continue
+
+        result["cards_linked"] += 1
+        in_stock = bool(product.get("in_stock"))
 
         record = {
-            "id": product["id"] if product else _stable_id(slug),
+            "id": product["id"],
             "slug": slug,
-            "name": (product or {}).get("name") or entry["name"],
-            "description": (product or {}).get("description") or entry["name"],
+            "name": product.get("name") or entry["name"],
+            "description": product.get("description") or entry["name"],
             "in_stock": in_stock,
             "prices": entry["prices"],
         }
         upsert_products(
             [record],
-            photo_file_id=card.get("photo_file_id") if card else None,
-            message_id=card.get("message_id") if card else None,
+            photo_file_id=card.get("photo_file_id"),
+            message_id=card.get("message_id"),
             force_prices=True,
         )
 

@@ -1,7 +1,4 @@
-# Reference copy of config.py (same env-loading behavior).
-# You do not need to copy this file — commit includes config.py.
-# Copy `.env.example` → `.env` and set secrets there.
-
+# Runtime config — committed without secrets. Set values in `.env` (see `.env.example`).
 import os
 from pathlib import Path
 from typing import Optional
@@ -29,8 +26,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+# Required: Telegram bot token from @BotFather
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
+# Payment is intentionally disabled for now (catalog + cart only).
 ENABLE_PAYMENTS = _env_bool("ENABLE_PAYMENTS", False)
 OXAPAY_API_KEY = os.getenv("OXAPAY_API_KEY", "")
 OXAPAY_SANDBOX = _env_bool("OXAPAY_SANDBOX", True)
@@ -38,20 +37,25 @@ PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 PAYMENT_CURRENCY = os.getenv("PAYMENT_CURRENCY", "USD")
 ENABLE_TELEGRAM_PAY = _env_bool("ENABLE_TELEGRAM_PAY", False)
 
+# Your numeric Telegram user ID (e.g. from @userinfobot)
 ADMIN_USER_ID = _env_int("ADMIN_USER_ID", 123456789) or 123456789
 
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@your_support_handle")
 SHOP_IMAGE = os.getenv("SHOP_IMAGE", "tetrahydroguild.png")
 CURRENCY = os.getenv("CURRENCY", "$")
 
+# Static product list is unused — catalog comes from the private stock channel.
 PRODUCTS = []
 
 # Private channel ID (bot must be admin). Example: -1001234567890
 STOCK_CHANNEL_ID = _env_int("STOCK_CHANNEL_ID")
 
+# Newest cached channel posts to refresh on /sync_catalog
 CATALOG_SYNC_POST_LIMIT = _env_int("CATALOG_SYNC_POST_LIMIT", 60) or 60
+# Newest product-card posts used when resolving item links / slugs
 CATALOG_ACTIVE_CARD_LOOKBACK = _env_int("CATALOG_ACTIVE_CARD_LOOKBACK", 20) or 20
 
+# Fallback prices only if a channel post has no price lines (prefer channel price posts).
 DEFAULT_PRICES = {1: 10.0, 5: 45.0, 10: 80.0}
 PRODUCT_PRICES = {}
 

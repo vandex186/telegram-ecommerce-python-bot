@@ -13,7 +13,8 @@ EMOJI_TITLE_RE = re.compile(
 EXPLICIT_PRICE_RE = re.compile(
     r"(?i)(\d{1,3})\s*(?:g|gr|gram|grams)\s*=\s*[£$€]?\s*(\d+(?:[.,]\d+)?)\s*[£$€]?"
 )
-SINGLE_PRICE_RE = re.compile(r"(?im)(?:price|cost)?\s*[:=\-]?\s*[£$€]?\s*(\d+(?:[.,]\d+)?)\s*[£$€]?")
+SINGLE_PRICE_RE = re.compile(r"(?im)(?:price|cost)?\s*=\s*[£$€]?\s*(\d+(?:[.,]\d+)?)\s*[£$€]?")
+SECTION_HEADER_RE = re.compile(r"^(AVAILABLE|HOT|PRICES|MENU|STOCK)$", re.I)
 TAG_RE = re.compile(r"<[^>]+>")
 CHANNEL_POST_LINK_RE = re.compile(r"https://t\.me/c/(\d+)/(\d+)")
 
@@ -60,8 +61,21 @@ def _extract_prices(block_text: str) -> Optional[dict]:
     return None
 
 
+def _is_section_header(line: str) -> bool:
+    return bool(SECTION_HEADER_RE.match((line or "").strip()))
+
+
+def _link_message_id_from_line(raw_line: str) -> Optional[int]:
+    match = CHANNEL_POST_LINK_RE.search(raw_line or "")
+    if not match:
+        return None
+    return int(match.group(2))
+
+
 def _is_price_title_line(line: str) -> bool:
     if not line or not re.search(r"[A-Za-z]", line):
+        return False
+    if _is_section_header(line):
         return False
     if AVAILABILITY_RE.search(line):
         return False
@@ -181,49 +195,67 @@ def is_price_post(text: str, has_photo: bool = False) -> bool:
 
 
 def parse_price_post_entries_with_links(text: str) -> list[dict]:
-    """Multi-item price post; attaches card_message_id from t.me/c/... links in order."""
-    entries = parse_price_post_entries(text)
-    link_ids = [int(match.group(2)) for match in CHANNEL_POST_LINK_RE.finditer(text)]
-    for index, entry in enumerate(entries):
-        if index < len(link_ids):
-            entry["card_message_id"] = link_ids[index]
-    return entries
+    """Parse price-list blocks; each block may include an inline or trailing t.me/c/… card link."""
+    return parse_price_post_entries(text)
 
 
 def parse_price_post_entries(text: str) -> list[dict]:
-    """Parse multi-item price posts, e.g. several strains in one message."""
+    """
+    Parse multi-item price posts block-by-block:
+    title → one or more price lines → optional t.me/c/… link to the product card.
+    """
     if not text or not text.strip():
         return []
 
-    lines = [_plain(ln) for ln in text.splitlines()]
+    raw_lines = [ln.rstrip() for ln in text.splitlines()]
+    plain_lines = [_plain(ln) for ln in raw_lines]
     entries = []
-    skip_until = 0
-    for idx, raw in enumerate(lines):
-        if idx < skip_until:
-            continue
-        title = raw.strip()
-        if not title:
-            continue
-        if not _is_price_title_line(title):
+    i = 0
+    n = len(plain_lines)
+
+    while i < n:
+        title = plain_lines[i].strip()
+        if not title or not _is_price_title_line(title):
+            i += 1
             continue
 
-        next_line = ""
-        next_idx = None
-        for j in range(idx + 1, len(lines)):
-            nxt = lines[j].strip()
-            if nxt:
-                next_line = nxt
-                next_idx = j
+        prices: dict[int, float] = {}
+        card_message_id = _link_message_id_from_line(raw_lines[i])
+
+        j = i + 1
+        while j < n:
+            line = plain_lines[j].strip()
+            if not line:
+                j += 1
+                continue
+            if _is_price_title_line(line) and not _extract_prices(line):
                 break
-        if next_line and AVAILABILITY_RE.search(next_line):
-            next_line = ""
 
-        prices = _pick_prices_for_title(title, next_line)
-        if not prices:
-            continue
+            link_id = _link_message_id_from_line(raw_lines[j])
+            if link_id is not None and not _extract_prices(line):
+                card_message_id = link_id
+                j += 1
+                continue
 
-        if next_idx is not None and next_line and _extract_prices(next_line):
-            skip_until = next_idx + 1
+            line_prices = _extract_prices(line)
+            if line_prices:
+                prices.update(line_prices)
+                j += 1
+                continue
 
-        entries.append({"slug": _slugify(title), "name": title, "prices": prices})
+            if _is_price_title_line(line):
+                break
+            j += 1
+
+        if prices:
+            entry = {
+                "slug": _slugify(title),
+                "name": title,
+                "prices": dict(sorted(prices.items())),
+            }
+            if card_message_id is not None:
+                entry["card_message_id"] = card_message_id
+            entries.append(entry)
+        i = j if j > i else i + 1
+
     return entries

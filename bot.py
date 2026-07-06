@@ -1,6 +1,7 @@
 import logging
 import html
 import re
+import sys
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -23,6 +24,8 @@ from telegram.ext import (
     PreCheckoutQueryHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
+from telegram.error import NetworkError, InvalidToken, TelegramError
 import requests
 import config
 import catalog_store
@@ -206,7 +209,6 @@ def strip_trailing_separator_lines(text: str) -> str:
 
 def build_cart_items_message(user_data: dict) -> str:
     cart_items = get_cart_items(user_data)
-    discount_code, discount_percent = get_effective_discount(user_data)
     total = get_cart_total(user_data)
     lines = ["Cart:", ""]
     for idx, item in enumerate(cart_items, start=1):
@@ -215,8 +217,6 @@ def build_cart_items_message(user_data: dict) -> str:
             lines.append("")
     lines.append("")
     lines.append(f"Total: <b>{html.escape(format_price(total))}</b>")
-    if discount_percent:
-        lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code))})")
     lines.append("")
     lines.append("- - - - - - - - - - - - - - - - -")
     lines.append("")
@@ -224,8 +224,13 @@ def build_cart_items_message(user_data: dict) -> str:
     return "\n".join(lines)
 
 
+def build_cart_footer_message() -> str:
+    return "Payment is not connected yet. Remove items above or keep shopping."
+
+
 def build_cart_delivery_message() -> str:
-    return "For creating order - please set your for delivery:"
+    """Legacy helper — delivery/checkout is not wired yet."""
+    return build_cart_footer_message()
 
 
 def build_checkout_review_message(user_data: dict, total: float) -> str:
@@ -312,7 +317,16 @@ async def send_product_card(chat, product: dict) -> None:
 
 async def send_shop_product_cards(chat, products: list) -> None:
     for product in products:
-        await send_product_card(chat, product)
+        try:
+            await send_product_card(chat, product)
+        except Exception as exc:
+            logging.warning("Shop card send failed for %s: %s", product.get("name"), exc)
+            caption = build_product_card_caption(product)
+            reply_markup = build_product_card_markup(product)
+            try:
+                await chat.send_message(caption, reply_markup=reply_markup, parse_mode="HTML")
+            except Exception as inner:
+                logging.error("Shop card fallback failed for %s: %s", product.get("name"), inner)
 
 
 def build_cart_remove_keyboard(user_data: dict) -> InlineKeyboardMarkup:
@@ -332,25 +346,19 @@ def build_cart_remove_keyboard(user_data: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def build_cart_delivery_keyboard(user_data: dict) -> InlineKeyboardMarkup:
-    address = user_data.get("cart_address")
-    phone = user_data.get("cart_phone")
-    address_btn_text = "Location ✅" if address else "Set Location"
-    phone_btn_text = "Phone ✅" if phone else "Set Phone"
-    _, discount_percent = get_effective_discount(user_data)
-    if discount_percent:
-        discount_btn_text = f"Discount ✅ {discount_percent}%"
-    else:
-        discount_btn_text = "Apply Discount Code"
-    return InlineKeyboardMarkup([
+def build_cart_footer_keyboard(user_data: Optional[dict] = None) -> InlineKeyboardMarkup:
+    """Cart actions while payment/delivery are disconnected."""
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(address_btn_text, callback_data="enter_address"),
-            InlineKeyboardButton(phone_btn_text, callback_data="enter_phone"),
-        ],
-        [InlineKeyboardButton(discount_btn_text, callback_data="enter_discount")],
-        [InlineKeyboardButton("Checkout", callback_data="checkout")],
-        [InlineKeyboardButton("Back", callback_data="menu_shop"), InlineKeyboardButton("Main Menu", callback_data="main_menu")],
-    ])
+            [InlineKeyboardButton("Shop", callback_data="menu_shop")],
+            [InlineKeyboardButton("Main Menu", callback_data="main_menu")],
+        ]
+    )
+
+
+def build_cart_delivery_keyboard(user_data: dict) -> InlineKeyboardMarkup:
+    """Legacy name used by older call sites — maps to cart footer."""
+    return build_cart_footer_keyboard(user_data)
 
 
 def build_empty_cart_keyboard() -> InlineKeyboardMarkup:
@@ -459,6 +467,12 @@ async def send_location_prompt(chat, user_data: dict, update: Update) -> None:
 
 def get_shop_products():
     if config.STOCK_CHANNEL_ID:
+        products = catalog_store.get_shop_products(available_only=True)
+        if products:
+            return products
+        sync_result = catalog_store.ensure_catalog_synced()
+        if not sync_result.get("skipped"):
+            logging.info("Shop auto-sync: %s", sync_result)
         return catalog_store.get_shop_products(available_only=True)
     return list(config.PRODUCTS)
 
@@ -490,6 +504,14 @@ async def process_catalog_message(message) -> int:
     )
     parsed_catalog = catalog_store.sync_from_text(text_for_store, photo_file_id, message.message_id)
     parsed_prices = catalog_store.sync_price_post(text_plain, message.message_id)
+    if config.STOCK_CHANNEL_ID:
+        sync_result = catalog_store.sync_catalog_full()
+        logging.info(
+            "Catalog auto-sync after channel post %s: available=%s linked=%s",
+            message_id,
+            sync_result.get("shop_available"),
+            sync_result.get("cards_linked"),
+        )
     return parsed_catalog + parsed_prices
 
 logging.basicConfig(
@@ -1021,10 +1043,10 @@ def fulfill_paid_cart(
 # --- Bot Handlers ---
 
 def build_main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
+    # Active features: catalog (Shop) + cart. Payment and extras are stubbed.
     rows = [
         [InlineKeyboardButton("Shop", callback_data="menu_shop")],
         [InlineKeyboardButton("Cart", callback_data="open_cart")],
-        [InlineKeyboardButton("Refer a Friend", callback_data="menu_referral")],
         [InlineKeyboardButton("Support", callback_data="menu_support")],
     ]
     if is_admin:
@@ -1047,6 +1069,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     apply_start_referral(context, user_id)
     is_admin = user_id == ADMIN_USER_ID
+    if is_admin:
+        await setup_admin_bot_commands(context.bot)
     reply_markup = build_main_menu_keyboard(is_admin)
     text = "Welcome to the shop!\n\nPlease choose an option:"
     if context.user_data.get("cart_referred_by") and update.message and context.args:
@@ -1116,11 +1140,21 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if config.STOCK_CHANNEL_ID:
                 total, available = catalog_store.catalog_stats()
                 if total == 0:
-                    extra = "\n\n(Catalog empty — add the bot to the stock channel as admin, then post or edit a catalog message.)"
+                    extra = (
+                        "\n\n(Catalog empty — add the bot to the stock channel as admin, "
+                        "forward the latest AVAILABLE price post + product cards to the bot, "
+                        "then run /sync_catalog.)"
+                    )
                 else:
-                    extra = f"\n\n({available} of {total} in stock — nothing available right now.)"
+                    extra = (
+                        f"\n\n({available} of {total} in stock — nothing available right now. "
+                        "Admin: /sync_catalog after updating the channel.)"
+                    )
             else:
-                extra = "\n\n(No products available.)"
+                extra = (
+                    "\n\n(Catalog not configured — set STOCK_CHANNEL_ID in .env "
+                    "and add the bot as admin of that private channel.)"
+                )
             await send_shop_header(chat)
             if extra:
                 await chat.send_message(extra.strip(), reply_markup=footer)
@@ -1398,9 +1432,9 @@ async def show_cart(
     chat = _resolve_chat(update_or_query)
     user_data["cart_chat_id"] = chat.id
     items_msg = build_cart_items_message(user_data)
-    delivery_msg = build_cart_delivery_message()
+    delivery_msg = build_cart_footer_message()
     remove_kb = build_cart_remove_keyboard(user_data)
-    delivery_kb = build_cart_delivery_keyboard(user_data)
+    delivery_kb = build_cart_footer_keyboard(user_data)
 
     if refresh_at_bottom:
         await _delete_cart_items_message(context, user_data)
@@ -1656,10 +1690,22 @@ async def contact_message_handler(update: Update, context: ContextTypes.DEFAULT_
     await show_cart(update, context, refresh_at_bottom=True)
 
 
+def payments_enabled() -> bool:
+    return bool(getattr(config, "ENABLE_PAYMENTS", False))
+
+
 async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Payment is intentionally disconnected — catalog + cart only for now."""
     query = update.callback_query
     await query.answer()
     chat = query.message.chat
+    if not payments_enabled():
+        await chat.send_message(
+            "Payment is not connected yet.\n"
+            "You can browse the catalog and manage your cart; checkout will be added later."
+        )
+        return
+
     user_id = update.effective_user.id
     user_data = context.user_data
     cart_items = get_cart_items(user_data)
@@ -2418,29 +2464,142 @@ async def sync_last_60_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _sync_last_posts_reply(update, 60)
 
 
+async def setup_admin_bot_commands(bot) -> bool:
+    """Set admin-only command menu; requires an existing private chat with ADMIN_USER_ID."""
+    try:
+        await bot.set_my_commands(
+            ADMIN_BOT_COMMANDS,
+            scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID),
+        )
+        return True
+    except TelegramError as exc:
+        logging.warning(
+            "Admin command menu not set for user %s (send /start to the bot first): %s",
+            ADMIN_USER_ID,
+            exc,
+        )
+        return False
+
+
 async def setup_bot_commands(application) -> None:
     """Hide admin-only commands from the menu for regular users."""
-    await application.bot.set_my_commands(PUBLIC_BOT_COMMANDS, scope=BotCommandScopeDefault())
-    await application.bot.set_my_commands(
-        ADMIN_BOT_COMMANDS,
-        scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID),
+    try:
+        await application.bot.set_my_commands(
+            PUBLIC_BOT_COMMANDS, scope=BotCommandScopeDefault()
+        )
+    except TelegramError as exc:
+        logging.warning("Could not set default bot commands: %s", exc)
+
+    await setup_admin_bot_commands(application.bot)
+
+
+async def post_init(application) -> None:
+    """Log bot identity after Telegram API connect, then register command menus."""
+    try:
+        me = await application.bot.get_me()
+        logging.info("Telegram API OK — bot @%s (id=%s)", me.username, me.id)
+        expected = os.getenv("EXPECTED_BOT_USERNAME", "TetraHydroGuild_bot").lstrip("@").lower()
+        if me.username and me.username.lower() != expected:
+            logging.warning(
+                "TELEGRAM_BOT_TOKEN is for @%s, not @%s — update .env if this is the wrong bot.",
+                me.username,
+                expected,
+            )
+    except TelegramError as exc:
+        logging.warning("Could not verify bot identity during post_init: %s", exc)
+
+    if config.STOCK_CHANNEL_ID:
+        try:
+            sync_result = catalog_store.ensure_catalog_synced()
+            if not sync_result.get("skipped"):
+                logging.info("Startup catalog sync: %s", sync_result)
+        except Exception as exc:
+            logging.warning("Startup catalog sync failed: %s", exc)
+
+    try:
+        await setup_bot_commands(application)
+    except Exception as exc:
+        logging.warning("Command menu setup failed (bot will still poll): %s", exc)
+
+
+def build_telegram_request() -> HTTPXRequest:
+    """Direct connection to api.telegram.org — ignore shell/IDE HTTP_PROXY vars."""
+    return HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        httpx_kwargs={"trust_env": False},
     )
 
 
+def _proxy_hint() -> str:
+    for key in (
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "ALL_PROXY", "all_proxy", "SOCKS_PROXY", "SOCKS5_PROXY",
+    ):
+        val = os.environ.get(key)
+        if val:
+            return f"\nDetected {key}={val} — use ./run.sh (it clears proxies) or unset it in your shell."
+    return ""
+
+
+def _startup_error_hint(exc: BaseException) -> str:
+    msg = str(exc).lower()
+    if isinstance(exc, InvalidToken) or "unauthorized" in msg or "401" in msg:
+        return "Invalid TELEGRAM_BOT_TOKEN — copy a fresh token from @BotFather into .env"
+    if "proxy" in msg or "403" in msg:
+        return (
+            "Cannot reach Telegram API through your HTTP proxy (403 Forbidden)."
+            + _proxy_hint()
+            + "\nRun: ./run.sh   (not: python bot.py from a shell that sets HTTP_PROXY)"
+        )
+    if "conflict" in msg or "409" in msg:
+        return "Another process is already polling this bot token. Stop the other instance."
+    if "nodename" in msg or "resolve" in msg or "connect" in msg or "network" in msg:
+        return (
+            "Cannot resolve or connect to api.telegram.org."
+            + _proxy_hint()
+            + "\nCheck internet/VPN/DNS, then retry ./run.sh"
+        )
+    return f"Startup failed: {exc}"
+
+
+def validate_runtime_config() -> None:
+    token = (config.TELEGRAM_BOT_TOKEN or "").strip()
+    if not token or token == "YOUR_BOT_TOKEN_HERE":
+        raise SystemExit(
+            "Missing TELEGRAM_BOT_TOKEN.\n"
+            "Copy .env.example to .env and set TELEGRAM_BOT_TOKEN from @BotFather."
+        )
+    if not config.STOCK_CHANNEL_ID:
+        logging.warning(
+            "STOCK_CHANNEL_ID is not set — shop catalog will stay empty until you set it in .env "
+            "and add the bot as admin of that private channel."
+        )
+
+
 if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+    )
+    validate_runtime_config()
     init_db()
     init_giveaway_db()
     catalog_store.init_catalog_db()
     app = (
         ApplicationBuilder()
         .token(config.TELEGRAM_BOT_TOKEN)
-        .post_init(setup_bot_commands)
+        .request(build_telegram_request())
+        .get_updates_request(build_telegram_request())
+        .post_init(post_init)
         .build()
     )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+    if payments_enabled():
+        app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+        app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("orders", orders))
     app.add_handler(CommandHandler("addcode", addcode))
     app.add_handler(CommandHandler("create_giveaway", create_giveaway_cmd))
@@ -2463,5 +2622,18 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.CONTACT, contact_message_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_message_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message_handler))
-    print("Bot is running...")
-    app.run_polling() 
+    logging.info(
+        "Starting bot (catalog channel=%s, payments=%s, admin=%s)",
+        config.STOCK_CHANNEL_ID,
+        payments_enabled(),
+        config.ADMIN_USER_ID,
+    )
+    print("Connecting to Telegram API… (Ctrl+C to stop)", flush=True)
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except SystemExit:
+        raise
+    except (NetworkError, InvalidToken, TelegramError, Exception) as exc:
+        logging.critical("Bot failed to start: %s", exc, exc_info=True)
+        print(_startup_error_hint(exc), file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc 
