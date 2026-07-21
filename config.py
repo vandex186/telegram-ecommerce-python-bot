@@ -51,7 +51,7 @@ PRODUCTS = []
 STOCK_CHANNEL_ID = _env_int("STOCK_CHANNEL_ID")
 
 # Newest cached channel posts to refresh on /sync_catalog
-CATALOG_SYNC_POST_LIMIT = _env_int("CATALOG_SYNC_POST_LIMIT", 60) or 60
+CATALOG_SYNC_POST_LIMIT = _env_int("CATALOG_SYNC_POST_LIMIT", 100) or 100
 # Newest product-card posts used when resolving item links / slugs
 CATALOG_ACTIVE_CARD_LOOKBACK = _env_int("CATALOG_ACTIVE_CARD_LOOKBACK", 20) or 20
 

@@ -483,6 +483,23 @@ def find_product(product_id):
     return next((p for p in config.PRODUCTS if p["id"] == product_id), None)
 
 
+def _catalog_ids_from_message(message) -> tuple[Optional[int], Optional[int]]:
+    """Prefer original channel ids (forwards) so t.me/c/... card links resolve."""
+    # Legacy forward fields
+    if getattr(message, "forward_from_chat", None) is not None:
+        fwd_mid = getattr(message, "forward_from_message_id", None)
+        return message.forward_from_chat.id, fwd_mid
+    # PTB v20+ MessageOriginChannel
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None and isinstance(origin, MessageOriginChannel):
+        return origin.chat.id, getattr(origin, "message_id", None)
+    # Direct channel post
+    return (
+        message.chat_id if getattr(message, "chat_id", None) else None,
+        message.message_id if getattr(message, "message_id", None) else None,
+    )
+
+
 async def process_catalog_message(message) -> int:
     text_plain = message.caption or message.text or ""
     text_formatted = None
@@ -493,8 +510,13 @@ async def process_catalog_message(message) -> int:
     text_for_store = text_formatted or text_plain
     photo_file_id = message.photo[-1].file_id if message.photo else None
     posted_at = message.date.isoformat() if getattr(message, "date", None) else None
-    chat_id = message.chat_id if getattr(message, "chat_id", None) else None
-    message_id = message.message_id if getattr(message, "message_id", None) else None
+    chat_id, message_id = _catalog_ids_from_message(message)
+    # Forwards into private chat must still be keyed by the stock channel id
+    if config.STOCK_CHANNEL_ID and (
+        chat_id is None or chat_id == message.chat_id
+    ):
+        # Origin hidden or missing — still cache under stock channel so sync can run
+        chat_id = config.STOCK_CHANNEL_ID
     catalog_store.save_source_post(
         chat_id=chat_id,
         message_id=message_id,
@@ -502,8 +524,8 @@ async def process_catalog_message(message) -> int:
         photo_file_id=photo_file_id,
         posted_at=posted_at,
     )
-    parsed_catalog = catalog_store.sync_from_text(text_for_store, photo_file_id, message.message_id)
-    parsed_prices = catalog_store.sync_price_post(text_plain, message.message_id)
+    parsed_catalog = catalog_store.sync_from_text(text_for_store, photo_file_id, message_id)
+    parsed_prices = catalog_store.sync_price_post(text_plain, message_id)
     if config.STOCK_CHANNEL_ID:
         sync_result = catalog_store.sync_catalog_full()
         logging.info(
@@ -1136,30 +1158,31 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
         if not products:
-            extra = ""
-            if config.STOCK_CHANNEL_ID:
-                total, available = catalog_store.catalog_stats()
-                if total == 0:
-                    extra = (
-                        "\n\n(Catalog empty — add the bot to the stock channel as admin, "
-                        "forward the latest AVAILABLE price post + product cards to the bot, "
-                        "then run /sync_catalog.)"
-                    )
+            is_admin = user_id == ADMIN_USER_ID
+            if is_admin:
+                if config.STOCK_CHANNEL_ID:
+                    total, available = catalog_store.catalog_stats()
+                    if total == 0:
+                        shop_msg = (
+                            "Catalog empty — add the bot to the stock channel as admin, "
+                            "forward the latest AVAILABLE price post + product cards to the bot, "
+                            "then run /sync_catalog."
+                        )
+                    else:
+                        shop_msg = (
+                            f"{available} of {total} in stock — nothing available right now. "
+                            "Run /sync_catalog after updating the channel."
+                        )
                 else:
-                    extra = (
-                        f"\n\n({available} of {total} in stock — nothing available right now. "
-                        "Admin: /sync_catalog after updating the channel.)"
+                    shop_msg = (
+                        "Catalog not configured — set STOCK_CHANNEL_ID in .env "
+                        "and add the bot as admin of that private channel."
                     )
             else:
-                extra = (
-                    "\n\n(Catalog not configured — set STOCK_CHANNEL_ID in .env "
-                    "and add the bot as admin of that private channel.)"
-                )
+                # Visitors: no setup diagnostics
+                shop_msg = "Nothing available right now. Check back soon!"
             await send_shop_header(chat)
-            if extra:
-                await chat.send_message(extra.strip(), reply_markup=footer)
-            else:
-                await chat.send_message(SHOP_FOOTER_TEXT, reply_markup=footer)
+            await chat.send_message(shop_msg, reply_markup=footer)
             return
 
         await send_shop_header(chat)
@@ -2396,15 +2419,31 @@ async def admin_forwarded_catalog_handler(update: Update, context: ContextTypes.
     msg = update.message
     if not msg or update.effective_user.id != ADMIN_USER_ID:
         return
-    channel_id = None
-    if msg.forward_from_chat:
-        channel_id = msg.forward_from_chat.id
-    elif msg.forward_origin and isinstance(msg.forward_origin, MessageOriginChannel):
-        channel_id = msg.forward_origin.chat.id
-    if channel_id != config.STOCK_CHANNEL_ID:
+    channel_id, original_mid = _catalog_ids_from_message(msg)
+    # Accept forwards from the stock channel, or origin-hidden forwards from admin
+    # (private channels often hide "Forwarded from" for non-subscribers).
+    if channel_id is not None and channel_id != config.STOCK_CHANNEL_ID:
+        await msg.reply_text(
+            f"Ignored: forward is from chat {channel_id}, "
+            f"expected STOCK_CHANNEL_ID={config.STOCK_CHANNEL_ID}."
+        )
+        return
+    if not (msg.caption or msg.text or msg.photo):
         return
     count = await process_catalog_message(msg)
-    await msg.reply_text(f"Catalog updated: {count} product(s) parsed.")
+    result = catalog_store.sync_catalog_full()
+    note = ""
+    if original_mid is None and channel_id is None:
+        note = (
+            "\n\nWarning: Telegram hid the original channel message id. "
+            "Card links (t.me/c/...) may not match until the bot is channel admin "
+            "and receives posts live, or you re-forward with origin visible."
+        )
+    await msg.reply_text(
+        f"Cached forward ({count} parse hit(s)).\n"
+        + _format_catalog_sync_result(result)
+        + note
+    )
 
 
 def _format_catalog_sync_result(result: dict) -> str:
@@ -2438,7 +2477,7 @@ async def sync_catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Not authorized.")
         return
-    limit = getattr(config, "CATALOG_SYNC_POST_LIMIT", 60)
+    limit = getattr(config, "CATALOG_SYNC_POST_LIMIT", 100)
     await update.message.reply_text(f"Syncing catalog (newest {limit} cached posts)…")
     result = catalog_store.sync_catalog_full(limit=limit)
     await update.message.reply_text(_format_catalog_sync_result(result))
