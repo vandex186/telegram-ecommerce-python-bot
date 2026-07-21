@@ -2415,13 +2415,47 @@ async def channel_catalog_handler(update: Update, context: ContextTypes.DEFAULT_
     logging.info("Catalog sync: %s products from channel message %s", count, post.message_id)
 
 
+def _message_looks_like_catalog(msg) -> bool:
+    """True for price lists / product cards even when Telegram hides forward origin."""
+    from catalog_parser import is_price_post, parse_catalog_text
+
+    text = (msg.caption or msg.text or "").strip()
+    has_photo = bool(msg.photo)
+    if not text and not has_photo:
+        return False
+    if text and is_price_post(text, has_photo=has_photo):
+        return True
+    if text and parse_catalog_text(text):
+        return True
+    # Photo + caption without availability marker still worth caching for admin ingest
+    return bool(has_photo and text)
+
+
 async def admin_forwarded_catalog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or update.effective_user.id != ADMIN_USER_ID:
+    if not msg:
         return
+    if update.effective_user.id != ADMIN_USER_ID:
+        # Silent for random users; admin misconfig should be obvious when testing
+        logging.info(
+            "Ignored catalog forward from user_id=%s (ADMIN_USER_ID=%s)",
+            update.effective_user.id,
+            ADMIN_USER_ID,
+        )
+        return
+    # Skip while admin is typing address / phone / broadcast
+    if context.user_data.get("awaiting_address") or context.user_data.get("awaiting_phone"):
+        return
+    if context.user_data.get("awaiting_broadcast"):
+        return
+
     channel_id, original_mid = _catalog_ids_from_message(msg)
-    # Accept forwards from the stock channel, or origin-hidden forwards from admin
-    # (private channels often hide "Forwarded from" for non-subscribers).
+    is_forward = bool(
+        getattr(msg, "forward_date", None)
+        or getattr(msg, "forward_origin", None)
+        or getattr(msg, "forward_from_chat", None)
+    )
+    # Accept forwards from the stock channel, or origin-hidden / copy-pasted catalog posts
     if channel_id is not None and channel_id != config.STOCK_CHANNEL_ID:
         await msg.reply_text(
             f"Ignored: forward is from chat {channel_id}, "
@@ -2430,17 +2464,26 @@ async def admin_forwarded_catalog_handler(update: Update, context: ContextTypes.
         return
     if not (msg.caption or msg.text or msg.photo):
         return
-    count = await process_catalog_message(msg)
-    result = catalog_store.sync_catalog_full()
+    if not is_forward and not _message_looks_like_catalog(msg):
+        return
+
+    try:
+        count = await process_catalog_message(msg)
+        result = catalog_store.sync_catalog_full()
+    except Exception as exc:
+        logging.exception("Catalog ingest failed: %s", exc)
+        await msg.reply_text(f"Catalog ingest error: {exc}")
+        return
+
     note = ""
-    if original_mid is None and channel_id is None:
+    if original_mid is None:
         note = (
-            "\n\nWarning: Telegram hid the original channel message id. "
-            "Card links (t.me/c/...) may not match until the bot is channel admin "
-            "and receives posts live, or you re-forward with origin visible."
+            "\n\nNote: original channel message id was not available. "
+            "Prefer Forward (not Copy) from the stock channel, or make the bot "
+            "channel admin so posts arrive live."
         )
     await msg.reply_text(
-        f"Cached forward ({count} parse hit(s)).\n"
+        f"Cached ({'forward' if is_forward else 'message'}, {count} parse hit(s)).\n"
         + _format_catalog_sync_result(result)
         + note
     )
@@ -2532,6 +2575,29 @@ async def setup_bot_commands(application) -> None:
     await setup_admin_bot_commands(application.bot)
 
 
+async def _periodic_catalog_sync(application) -> None:
+    """Re-parse cached channel posts on a timer (replaces manual /sync_catalog for most cases)."""
+    import asyncio
+
+    interval_min = int(getattr(config, "CATALOG_SYNC_INTERVAL_MINUTES", 0) or 0)
+    if interval_min <= 0 or not config.STOCK_CHANNEL_ID:
+        return
+    limit = getattr(config, "CATALOG_SYNC_POST_LIMIT", 100)
+    logging.info("Periodic catalog sync every %s min (limit=%s)", interval_min, limit)
+    while True:
+        await asyncio.sleep(interval_min * 60)
+        try:
+            result = catalog_store.sync_catalog_full(limit=limit)
+            logging.info(
+                "Periodic catalog sync: ok=%s available=%s linked=%s",
+                result.get("ok"),
+                result.get("shop_available"),
+                result.get("cards_linked"),
+            )
+        except Exception as exc:
+            logging.warning("Periodic catalog sync failed: %s", exc)
+
+
 async def post_init(application) -> None:
     """Log bot identity after Telegram API connect, then register command menus."""
     try:
@@ -2559,6 +2625,12 @@ async def post_init(application) -> None:
         await setup_bot_commands(application)
     except Exception as exc:
         logging.warning("Command menu setup failed (bot will still poll): %s", exc)
+
+    # Lightweight timer — no APScheduler (breaks on some macOS/Python setups)
+    if getattr(config, "CATALOG_SYNC_INTERVAL_MINUTES", 0):
+        import asyncio
+
+        asyncio.create_task(_periodic_catalog_sync(application))
 
 
 def build_telegram_request() -> HTTPXRequest:
@@ -2656,7 +2728,13 @@ if __name__ == "__main__":
         CommandHandler("sync_last_60", sync_last_60_cmd, filters=ADMIN_USER_FILTER)
     )
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_catalog_handler))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, admin_forwarded_catalog_handler))
+    # Admin catalog ingest: forwards (any media) + photos with captions (copy/share without forward flag)
+    _admin_catalog_filter = (
+        filters.ChatType.PRIVATE
+        & filters.User(user_id=ADMIN_USER_ID)
+        & (filters.FORWARDED | (filters.PHOTO & filters.CAPTION))
+    )
+    app.add_handler(MessageHandler(_admin_catalog_filter, admin_forwarded_catalog_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, address_message_handler))
     app.add_handler(MessageHandler(filters.CONTACT, contact_message_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_message_handler))

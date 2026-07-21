@@ -54,6 +54,8 @@ STOCK_CHANNEL_ID = _env_int("STOCK_CHANNEL_ID")
 CATALOG_SYNC_POST_LIMIT = _env_int("CATALOG_SYNC_POST_LIMIT", 100) or 100
 # Newest product-card posts used when resolving item links / slugs
 CATALOG_ACTIVE_CARD_LOOKBACK = _env_int("CATALOG_ACTIVE_CARD_LOOKBACK", 20) or 20
+# Background auto-sync interval while the bot process is running (0 = disabled)
+CATALOG_SYNC_INTERVAL_MINUTES = _env_int("CATALOG_SYNC_INTERVAL_MINUTES", 15) or 0
 
 # Fallback prices only if a channel post has no price lines (prefer channel price posts).
 DEFAULT_PRICES = {1: 10.0, 5: 45.0, 10: 80.0}

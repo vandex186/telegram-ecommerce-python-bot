@@ -5,18 +5,25 @@ Uses cached channel posts in orders.db (bot must have received channel updates).
 
 Usage:
   python sync_catalog_cli.py
-  python sync_catalog_cli.py --limit 60
+  python sync_catalog_cli.py --limit 100
 """
 import argparse
 import json
 import sys
 
 import catalog_store
+import config
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync shop from latest price post + product cards")
-    parser.add_argument("--limit", type=int, default=60, help="Newest cached channel posts to refresh")
+    default_limit = getattr(config, "CATALOG_SYNC_POST_LIMIT", 100)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=default_limit,
+        help="Newest cached channel posts to refresh",
+    )
     args = parser.parse_args()
 
     catalog_store.init_catalog_db()
