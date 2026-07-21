@@ -17,7 +17,7 @@ services:
       - key: CATALOG_SYNC_POST_LIMIT
         value: "100"
       - key: CATALOG_SYNC_INTERVAL_MINUTES
-        value: "15"
+        value: "5"
       - key: OXAPAY_API_KEY
         sync: false
       - key: TZ

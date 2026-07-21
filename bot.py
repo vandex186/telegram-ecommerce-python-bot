@@ -61,6 +61,9 @@ PUBLIC_BOT_COMMANDS = [
     BotCommand("start", "Main menu"),
 ]
 
+# Catalog sync runs automatically (periodic + on channel post), so the redundant
+# sync_last_30 / sync_last_60 shortcuts are dropped; /sync_catalog stays as a
+# manual force. Orders, discount, and giveaway commands are kept (in active use).
 ADMIN_BOT_COMMANDS = [
     BotCommand("start", "Main menu"),
     BotCommand("orders", "Recent orders"),
@@ -70,9 +73,7 @@ ADMIN_BOT_COMMANDS = [
     BotCommand("list_giveaways", "List giveaways"),
     BotCommand("view_entries", "Giveaway entries"),
     BotCommand("bot_status", "Bot status"),
-    BotCommand("sync_catalog", "Full catalog sync (prices + cards)"),
-    BotCommand("sync_last_30", "Re-parse last 30 cached channel posts"),
-    BotCommand("sync_last_60", "Re-parse last 60 cached channel posts"),
+    BotCommand("sync_catalog", "Sync catalog now (manual)"),
 ]
 
 
