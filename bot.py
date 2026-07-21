@@ -541,6 +541,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+# httpx/telegram log full request URLs at INFO, which leaks the bot token into
+# the logs. Keep them at WARNING so the token never gets printed.
+for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.Updater"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 def init_db():
     conn = sqlite3.connect("orders.db")
@@ -2695,6 +2699,8 @@ if __name__ == "__main__":
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         level=logging.INFO,
     )
+    for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.Updater"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
     validate_runtime_config()
     init_db()
     init_giveaway_db()
