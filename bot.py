@@ -1465,6 +1465,13 @@ async def _show_empty_cart(update_or_query, context: ContextTypes.DEFAULT_TYPE) 
             user_data["cart_chat_id"] = sent.chat_id
 
 
+def _is_not_modified_error(exc: Exception) -> bool:
+    """Telegram raises BadRequest 'message is not modified' when an edit would
+    not change anything. That means the existing message is already correct, so
+    we must treat it as success and keep its id (not resend a duplicate)."""
+    return "not modified" in str(exc).lower()
+
+
 async def show_cart(
     update_or_query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1510,9 +1517,12 @@ async def show_cart(
                 parse_mode="HTML",
             )
             items_ok = True
-        except Exception:
-            user_data.pop("cart_items_message_id", None)
-            items_mid = None
+        except Exception as exc:
+            if _is_not_modified_error(exc):
+                items_ok = True
+            else:
+                user_data.pop("cart_items_message_id", None)
+                items_mid = None
 
     if not items_ok:
         query_msg = None
@@ -1546,8 +1556,11 @@ async def show_cart(
                 parse_mode="HTML",
             )
             delivery_ok = True
-        except Exception:
-            user_data.pop("cart_delivery_message_id", None)
+        except Exception as exc:
+            if _is_not_modified_error(exc):
+                delivery_ok = True
+            else:
+                user_data.pop("cart_delivery_message_id", None)
 
     if not delivery_ok:
         sent_delivery = await chat.send_message(delivery_msg, reply_markup=delivery_kb, parse_mode="HTML")
