@@ -26,6 +26,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int_list(name: str) -> list:
+    raw = os.getenv(name, "")
+    ids = []
+    for part in str(raw).replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            pass
+    return ids
+
+
 # Required: Telegram bot token from @BotFather
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
@@ -39,6 +53,15 @@ ENABLE_TELEGRAM_PAY = _env_bool("ENABLE_TELEGRAM_PAY", False)
 
 # Your numeric Telegram user ID (e.g. from @userinfobot)
 ADMIN_USER_ID = _env_int("ADMIN_USER_ID", 123456789) or 123456789
+
+# Telegram user IDs that receive new orders (comma-separated). Empty = ADMIN_USER_ID.
+# Each recipient must have opened a private chat with the bot at least once.
+ORDER_ADMIN_IDS = _env_int_list("ORDER_ADMIN_IDS") or [ADMIN_USER_ID]
+
+# Text shown to the customer on the payment step before the order is placed.
+# Leave empty to show the default "manual payment" placeholder message.
+# This is the seam where a real payment integration plugs in later.
+PAYMENT_INSTRUCTIONS = os.getenv("PAYMENT_INSTRUCTIONS", "")
 
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@your_support_handle")
 SHOP_IMAGE = os.getenv("SHOP_IMAGE", "tetrahydroguild.png")

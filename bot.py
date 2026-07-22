@@ -225,13 +225,22 @@ def build_cart_items_message(user_data: dict) -> str:
     return "\n".join(lines)
 
 
-def build_cart_footer_message() -> str:
-    return "Payment is not connected yet. Remove items above or keep shopping."
+def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
+    """Delivery summary + checkout prompt shown under the cart items."""
+    user_data = user_data or {}
+    address = user_data.get("cart_address")
+    phone = user_data.get("cart_phone")
+    lines = ["Delivery details:", ""]
+    lines.append(f"📍 Location: {html.escape(address) if address else '— not set —'}")
+    lines.append(f"📞 Phone: {html.escape(phone) if phone else '— not set —'}")
+    lines.append("")
+    lines.append("Set your location (required) and phone, then tap Checkout.")
+    return "\n".join(lines)
 
 
-def build_cart_delivery_message() -> str:
-    """Legacy helper — delivery/checkout is not wired yet."""
-    return build_cart_footer_message()
+def build_cart_delivery_message(user_data: Optional[dict] = None) -> str:
+    """Legacy alias kept for older call sites."""
+    return build_cart_footer_message(user_data)
 
 
 def build_checkout_review_message(user_data: dict, total: float) -> str:
@@ -348,11 +357,22 @@ def build_cart_remove_keyboard(user_data: dict) -> InlineKeyboardMarkup:
 
 
 def build_cart_footer_keyboard(user_data: Optional[dict] = None) -> InlineKeyboardMarkup:
-    """Cart actions while payment/delivery are disconnected."""
+    """Checkout + delivery/discount entry buttons under the cart."""
+    user_data = user_data or {}
+    has_address = bool(user_data.get("cart_address"))
+    has_phone = bool(user_data.get("cart_phone"))
+    location_label = "📍 Change Location" if has_address else "📍 Set Location"
+    phone_label = "📞 Change Phone" if has_phone else "📞 Set Phone"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Shop", callback_data="menu_shop")],
-            [InlineKeyboardButton("Main Menu", callback_data="main_menu")],
+            [InlineKeyboardButton("✅ Checkout", callback_data="checkout")],
+            [InlineKeyboardButton(location_label, callback_data="enter_address")],
+            [InlineKeyboardButton(phone_label, callback_data="enter_phone")],
+            [InlineKeyboardButton("🏷️ Discount / Referral code", callback_data="enter_discount")],
+            [
+                InlineKeyboardButton("Shop", callback_data="menu_shop"),
+                InlineKeyboardButton("Main Menu", callback_data="main_menu"),
+            ],
         ]
     )
 
@@ -1460,7 +1480,7 @@ async def show_cart(
     chat = _resolve_chat(update_or_query)
     user_data["cart_chat_id"] = chat.id
     items_msg = build_cart_items_message(user_data)
-    delivery_msg = build_cart_footer_message()
+    delivery_msg = build_cart_footer_message(user_data)
     remove_kb = build_cart_remove_keyboard(user_data)
     delivery_kb = build_cart_footer_keyboard(user_data)
 
@@ -1722,18 +1742,127 @@ def payments_enabled() -> bool:
     return bool(getattr(config, "ENABLE_PAYMENTS", False))
 
 
+def get_order_admin_ids() -> list:
+    """Telegram user IDs that should receive new orders."""
+    ids = list(getattr(config, "ORDER_ADMIN_IDS", None) or [])
+    if not ids and ADMIN_USER_ID:
+        ids = [ADMIN_USER_ID]
+    # De-duplicate while preserving order.
+    seen = set()
+    unique = []
+    for uid in ids:
+        if uid and uid not in seen:
+            seen.add(uid)
+            unique.append(uid)
+    return unique
+
+
+def get_payment_instructions() -> str:
+    return (getattr(config, "PAYMENT_INSTRUCTIONS", "") or "").strip()
+
+
+def build_payment_step_message(user_data: dict, price: float) -> str:
+    """Customer-facing payment step. This is the seam where a real payment
+    integration plugs in later; for now it shows manual instructions and the
+    order is placed once the customer confirms."""
+    amount = format_price(price)
+    lines = [f"Amount to pay: <b>{html.escape(amount)}</b>", ""]
+    instructions = get_payment_instructions()
+    if instructions:
+        lines.append(html.escape(instructions))
+    else:
+        lines.append("Payment is arranged manually for now.")
+        lines.append(
+            "Tap “Confirm & send order” to place your order — our team will "
+            "contact you to arrange payment and delivery."
+        )
+    lines.append("")
+    lines.append("Once you confirm, your order is sent to our team.")
+    return "\n".join(lines)
+
+
+def build_payment_step_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Confirm & send order", callback_data="confirm_order")],
+            [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
+        ]
+    )
+
+
+async def send_payment_step(chat, user_data: dict, price: float) -> None:
+    await chat.send_message(
+        build_payment_step_message(user_data, price),
+        reply_markup=build_payment_step_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+def build_admin_order_message(user, cart_items: list, price: float, discount_code,
+                              discount_percent: int, address, phone, invoice_id: str) -> str:
+    if getattr(user, "username", None):
+        who = f"@{user.username}"
+    else:
+        who = getattr(user, "full_name", None) or str(getattr(user, "id", "?"))
+    lines = [
+        "🛒 <b>NEW ORDER</b>",
+        "",
+        f"Order: <code>{html.escape(str(invoice_id))}</code>",
+        f"Customer: {html.escape(str(who))} (id <code>{getattr(user, 'id', '?')}</code>)",
+        "",
+    ]
+    for idx, item in enumerate(cart_items, start=1):
+        lines.extend(format_cart_item_block(idx, item))
+        if idx < len(cart_items):
+            lines.append("")
+    lines.append("")
+    if discount_percent:
+        lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
+    lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
+    if address:
+        lines.append(f"\n📍 Location:\n{html.escape(str(address))}")
+    if phone:
+        lines.append(f"\n📞 Phone: {html.escape(str(phone))}")
+    return "\n".join(lines)
+
+
+async def notify_order_admins(context: ContextTypes.DEFAULT_TYPE, text: str) -> int:
+    """Send the formatted order to every configured admin. Returns count sent."""
+    sent = 0
+    for admin_id in get_order_admin_ids():
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML")
+            sent += 1
+        except Exception as exc:
+            logging.warning("Failed to deliver order to admin %s: %s", admin_id, exc)
+    return sent
+
+
+def build_customer_order_confirmation(cart_items: list, price: float, address, phone) -> str:
+    lines = ["✅ Order placed! Our team will contact you shortly.", ""]
+    for idx, item in enumerate(cart_items, start=1):
+        lines.extend(format_cart_item_block(idx, item))
+        if idx < len(cart_items):
+            lines.append("")
+    lines.append("")
+    lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
+    if address:
+        lines.append(f"\n📍 Location:\n{html.escape(str(address))}")
+    if phone:
+        lines.append(f"\n📞 Phone: {html.escape(str(phone))}")
+    return "\n".join(lines)
+
+
 async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Payment is intentionally disconnected — catalog + cart only for now."""
+    """Assemble the order and route to payment.
+
+    - If an automated payment method is enabled (ENABLE_PAYMENTS + OxaPay /
+      Telegram Pay) the existing invoice flow runs.
+    - Otherwise the manual flow runs: review → payment step (placeholder) →
+      customer confirms → order is sent to admin(s)."""
     query = update.callback_query
     await query.answer()
     chat = query.message.chat
-    if not payments_enabled():
-        await chat.send_message(
-            "Payment is not connected yet.\n"
-            "You can browse the catalog and manage your cart; checkout will be added later."
-        )
-        return
-
     user_id = update.effective_user.id
     user_data = context.user_data
     cart_items = get_cart_items(user_data)
@@ -1743,6 +1872,7 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_empty_cart_keyboard(),
         )
         return
+
     price = sync_cart_price(user_data)
     address = user_data.get("cart_address")
     if not address:
@@ -1753,28 +1883,79 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_checkout_location_keyboard(),
         )
         return
+
     await chat.send_message(
         build_checkout_review_message(user_data, price),
         parse_mode="HTML",
     )
 
-    payment_keyboard = build_checkout_payment_keyboard(user_data)
-    if payment_keyboard:
-        await chat.send_message("Choose payment method:", reply_markup=payment_keyboard)
+    # Automated payment path (only when explicitly enabled and configured).
+    if payments_enabled():
+        payment_keyboard = build_checkout_payment_keyboard(user_data)
+        if payment_keyboard:
+            await chat.send_message("Choose payment method:", reply_markup=payment_keyboard)
+            return
+        if get_oxapay_api_key():
+            await start_crypto_payment(context, chat, user_id, user_data, cart_items, price)
+            return
+        if is_telegram_pay_enabled():
+            await start_telegram_payment(context, chat, user_id, user_data, cart_items, price)
+            return
+
+    # Manual payment placeholder → customer confirms → order goes to admins.
+    await send_payment_step(chat, user_data, price)
+
+
+async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Finalize a manual order: save it, notify admins, confirm to customer."""
+    query = update.callback_query
+    await query.answer()
+    chat = query.message.chat
+    user = update.effective_user
+    user_data = context.user_data
+    cart_items = get_cart_items(user_data)
+    if not cart_items:
+        await chat.send_message(
+            "Your cart is empty.",
+            reply_markup=build_empty_cart_keyboard(),
+        )
         return
 
-    if get_oxapay_api_key():
-        await start_crypto_payment(context, chat, user_id, user_data, cart_items, price)
-        return
+    price = sync_cart_price(user_data)
+    discount_code, discount_percent = get_effective_discount(user_data)
+    referred_by = user_data.get("cart_referred_by")
+    address = user_data.get("cart_address")
+    phone = user_data.get("cart_phone")
+    invoice_id = f"MANUAL-{user.id}-{int(time.time())}"
 
-    if is_telegram_pay_enabled():
-        await start_telegram_payment(context, chat, user_id, user_data, cart_items, price)
-        return
+    for item in cart_items:
+        line_price = float(item.get("line_price", 0))
+        product = {
+            "id": item.get("product_id", 0),
+            "name": item.get("product_name", "Item"),
+        }
+        qty = int(item.get("qty", 1))
+        save_order(
+            user.id, product, qty, line_price, invoice_id,
+            discount_code, discount_percent, referred_by, address, phone,
+        )
+
+    admin_text = build_admin_order_message(
+        user, cart_items, price, discount_code, discount_percent, address, phone, invoice_id,
+    )
+    delivered = await notify_order_admins(context, admin_text)
+    if delivered == 0:
+        logging.warning("Order %s saved but no admin received it (check ORDER_ADMIN_IDS).", invoice_id)
 
     await chat.send_message(
-        "No payment method configured.\n"
-        "Admin: set OXAPAY_API_KEY in .env (recommended), or enable ENABLE_TELEGRAM_PAY=true with PAYMENT_PROVIDER_TOKEN."
+        build_customer_order_confirmation(cart_items, price, address, phone),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
+        ),
+        parse_mode="HTML",
     )
+    clear_cart_after_payment(user_data)
+
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1832,6 +2013,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_phone"] = False
         context.user_data["awaiting_discount"] = False
         await show_cart(update, context)
+    elif data == "confirm_order":
+        await confirm_order_handler(update, context)
     elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
         await cart_handler(update, context)
     elif data == "pay_telegram":
