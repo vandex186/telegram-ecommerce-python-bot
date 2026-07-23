@@ -2025,7 +2025,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_address"] = False
         context.user_data["awaiting_phone"] = False
         context.user_data["awaiting_discount"] = False
-        await show_cart(update, context)
+        # Always re-send cart at the bottom of the chat (delete old cart msgs first).
+        await show_cart(update, context, refresh_at_bottom=True)
     elif data == "confirm_order":
         await confirm_order_handler(update, context)
     elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
