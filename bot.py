@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+from io import BytesIO
 
 SHOP_HEADER_CAPTION = (
     "<b>T E T R A H Y D R O G U I L D</b>\n\n"
@@ -1811,17 +1812,89 @@ async def send_payment_step(chat, user_data: dict, price: float) -> None:
     )
 
 
-def build_admin_order_message(user, cart_items: list, price: float, discount_code,
-                              discount_percent: int, address, phone, invoice_id: str) -> str:
-    if getattr(user, "username", None):
-        who = f"@{user.username}"
-    else:
-        who = getattr(user, "full_name", None) or str(getattr(user, "id", "?"))
+def format_customer_label(user) -> str:
+    name = getattr(user, "full_name", None) or getattr(user, "first_name", None)
+    if not name and getattr(user, "username", None):
+        name = f"@{user.username}"
+    if not name:
+        name = str(getattr(user, "id", "?"))
+    return f"{html.escape(str(name))} (id <code>{getattr(user, 'id', '?')}</code>)"
+
+
+def format_location_line(address) -> str:
+    """📍 Location: GoogleMaps->  (GoogleMaps-> is a clickable link)."""
+    if not address:
+        return ""
+    url = str(address).strip()
+    return f'📍 Location: <a href="{html.escape(url)}">GoogleMaps-></a>'
+
+
+def parse_lat_lon_from_address(address: str) -> Optional[tuple]:
+    if not address:
+        return None
+    text = str(address).strip()
+    m = re.search(r"[?&]q=(-?\d+\.?\d*),\s*(-?\d+\.?\d*)", text)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r"@(-?\d+\.?\d*),(-?\d+\.?\d*)", text)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)", text)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    return None
+
+
+def fetch_location_map_png(address: str) -> Optional[bytes]:
+    """Fetch a normal-scale static map screenshot for the delivery pin."""
+    coords = parse_lat_lon_from_address(address)
+    if not coords:
+        return None
+    lat, lon = coords
+    url = (
+        "https://staticmap.openstreetmap.de/staticmap.php"
+        f"?center={lat},{lon}&zoom=15&size=600x400&maptype=mapnik"
+        f"&markers={lat},{lon},red-pushpin"
+    )
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "TetraHydroGuildBot/1.0 (order map preview)"},
+        )
+        content_type = (response.headers.get("content-type") or "").lower()
+        if response.status_code == 200 and response.content and "image" in content_type:
+            return response.content
+        logging.warning(
+            "Location map fetch failed: status=%s type=%s",
+            response.status_code,
+            content_type,
+        )
+    except Exception as exc:
+        logging.warning("Failed to fetch location map: %s", exc)
+    return None
+
+
+def build_order_placed_message(
+    user,
+    cart_items: list,
+    price: float,
+    discount_code,
+    discount_percent: int,
+    address,
+    phone,
+    invoice_id: str,
+) -> str:
+    """Single order message used for both customer confirmation and admin notify."""
     lines = [
         "🛒 <b>NEW ORDER</b>",
         "",
         f"Order: <code>{html.escape(str(invoice_id))}</code>",
-        f"Customer: {html.escape(str(who))} (id <code>{getattr(user, 'id', '?')}</code>)",
+        f"Customer: {format_customer_label(user)}",
+        "",
+        "✅ Order placed! Our team will contact you shortly.",
+        "",
+        "- - - - - - - - - - - - - - - - - - -",
         "",
     ]
     for idx, item in enumerate(cart_items, start=1):
@@ -1833,37 +1906,64 @@ def build_admin_order_message(user, cart_items: list, price: float, discount_cod
         lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
     lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
     if address:
-        lines.append(f"\n📍 Location:\n{html.escape(str(address))}")
+        lines.append("")
+        lines.append(format_location_line(address))
     if phone:
-        lines.append(f"\n📞 Phone: {html.escape(str(phone))}")
+        lines.append(f"📞 Phone: {html.escape(str(phone))}")
     return "\n".join(lines)
 
 
-async def notify_order_admins(context: ContextTypes.DEFAULT_TYPE, text: str) -> int:
-    """Send the formatted order to every configured admin. Returns count sent."""
+async def send_order_message(
+    bot,
+    chat_id: int,
+    text: str,
+    *,
+    map_png: Optional[bytes] = None,
+    reply_markup=None,
+) -> None:
+    """Send order text; attach a location map photo when provided (admin path)."""
+    if map_png and len(text) <= 1024:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=BytesIO(map_png),
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return
+    if map_png:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=BytesIO(map_png),
+            caption="📍 Delivery location",
+        )
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+    )
+
+
+async def notify_order_admins(
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    map_png: Optional[bytes] = None,
+    skip_user_id: Optional[int] = None,
+) -> int:
+    """Send the order to every configured admin. Returns count sent."""
     sent = 0
     for admin_id in get_order_admin_ids():
+        if skip_user_id is not None and admin_id == skip_user_id:
+            continue
         try:
-            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML")
+            await send_order_message(context.bot, admin_id, text, map_png=map_png)
             sent += 1
         except Exception as exc:
             logging.warning("Failed to deliver order to admin %s: %s", admin_id, exc)
     return sent
-
-
-def build_customer_order_confirmation(cart_items: list, price: float, address, phone) -> str:
-    lines = ["✅ Order placed! Our team will contact you shortly.", ""]
-    for idx, item in enumerate(cart_items, start=1):
-        lines.extend(format_cart_item_block(idx, item))
-        if idx < len(cart_items):
-            lines.append("")
-    lines.append("")
-    lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
-    if address:
-        lines.append(f"\n📍 Location:\n{html.escape(str(address))}")
-    if phone:
-        lines.append(f"\n📞 Phone: {html.escape(str(phone))}")
-    return "\n".join(lines)
 
 
 async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1953,20 +2053,44 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
             discount_code, discount_percent, referred_by, address, phone,
         )
 
-    admin_text = build_admin_order_message(
+    order_text = build_order_placed_message(
         user, cart_items, price, discount_code, discount_percent, address, phone, invoice_id,
     )
-    delivered = await notify_order_admins(context, admin_text)
-    if delivered == 0:
+    map_png = fetch_location_map_png(address) if address else None
+    main_menu_kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
+    )
+    admin_ids = set(get_order_admin_ids())
+    customer_is_admin = user.id in admin_ids
+
+    # One confirmation for the customer. If they are also an admin, attach the map
+    # so they don't get a second nearly-identical admin copy in the same chat.
+    try:
+        await send_order_message(
+            context.bot,
+            chat.id,
+            order_text,
+            map_png=map_png if customer_is_admin else None,
+            reply_markup=main_menu_kb,
+        )
+    except Exception as exc:
+        logging.warning("Customer order confirmation failed: %s", exc)
+        await chat.send_message(
+            order_text,
+            reply_markup=main_menu_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    delivered = await notify_order_admins(
+        context,
+        order_text,
+        map_png=map_png,
+        skip_user_id=user.id if customer_is_admin else None,
+    )
+    if delivered == 0 and not customer_is_admin:
         logging.warning("Order %s saved but no admin received it (check ORDER_ADMIN_IDS).", invoice_id)
 
-    await chat.send_message(
-        build_customer_order_confirmation(cart_items, price, address, phone),
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
-        ),
-        parse_mode="HTML",
-    )
     clear_cart_after_payment(user_data)
 
 
