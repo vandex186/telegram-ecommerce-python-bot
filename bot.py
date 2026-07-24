@@ -1851,27 +1851,34 @@ def fetch_location_map_png(address: str) -> Optional[bytes]:
     if not coords:
         return None
     lat, lon = coords
-    url = (
-        "https://staticmap.openstreetmap.de/staticmap.php"
-        f"?center={lat},{lon}&zoom=15&size=600x400&maptype=mapnik"
-        f"&markers={lat},{lon},red-pushpin"
-    )
-    try:
-        response = requests.get(
-            url,
-            timeout=15,
-            headers={"User-Agent": "TetraHydroGuildBot/1.0 (order map preview)"},
-        )
-        content_type = (response.headers.get("content-type") or "").lower()
-        if response.status_code == 200 and response.content and "image" in content_type:
-            return response.content
-        logging.warning(
-            "Location map fetch failed: status=%s type=%s",
-            response.status_code,
-            content_type,
-        )
-    except Exception as exc:
-        logging.warning("Failed to fetch location map: %s", exc)
+    # Prefer providers that work without an API key. Yandex first (reliable),
+    # then OpenStreetMap staticmap as fallback.
+    urls = [
+        (
+            f"https://static-maps.yandex.ru/1.x/"
+            f"?ll={lon},{lat}&z=15&l=map&size=600,400&pt={lon},{lat},pm2rdm"
+        ),
+        (
+            "https://staticmap.openstreetmap.de/staticmap.php"
+            f"?center={lat},{lon}&zoom=15&size=600x400&maptype=mapnik"
+            f"&markers={lat},{lon},red-pushpin"
+        ),
+    ]
+    headers = {"User-Agent": "TetraHydroGuildBot/1.0 (order map preview)"}
+    for url in urls:
+        try:
+            response = requests.get(url, timeout=15, headers=headers)
+            content_type = (response.headers.get("content-type") or "").lower()
+            if response.status_code == 200 and response.content and "image" in content_type:
+                return response.content
+            logging.warning(
+                "Location map fetch failed: status=%s type=%s url=%s",
+                response.status_code,
+                content_type,
+                url.split("?")[0],
+            )
+        except Exception as exc:
+            logging.warning("Failed to fetch location map from %s: %s", url.split("?")[0], exc)
     return None
 
 
