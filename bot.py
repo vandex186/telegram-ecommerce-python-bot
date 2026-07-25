@@ -37,7 +37,6 @@ import os
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
-from io import BytesIO
 
 SHOP_HEADER_CAPTION = (
     "<b>T E T R A H Y D R O G U I L D</b>\n\n"
@@ -1830,6 +1829,15 @@ def format_location_line(address) -> str:
 
 
 def parse_lat_lon_from_address(address: str) -> Optional[tuple]:
+    """Extract (lat, lon) when the saved address contains coordinates.
+
+    Works for links like:
+      https://maps.google.com/?q=11.58,104.91
+      https://www.google.com/maps/@11.58,104.91,15z
+    Does NOT work for short links without coords in the URL itself
+    (e.g. https://maps.app.goo.gl/xxxxx) — those need an HTTP redirect
+    resolve, which we skip for reliability.
+    """
     if not address:
         return None
     text = str(address).strip()
@@ -1842,43 +1850,6 @@ def parse_lat_lon_from_address(address: str) -> Optional[tuple]:
     m = re.search(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)", text)
     if m:
         return float(m.group(1)), float(m.group(2))
-    return None
-
-
-def fetch_location_map_png(address: str) -> Optional[bytes]:
-    """Fetch a normal-scale static map screenshot for the delivery pin."""
-    coords = parse_lat_lon_from_address(address)
-    if not coords:
-        return None
-    lat, lon = coords
-    # Prefer providers that work without an API key. Yandex first (reliable),
-    # then OpenStreetMap staticmap as fallback.
-    urls = [
-        (
-            f"https://static-maps.yandex.ru/1.x/"
-            f"?ll={lon},{lat}&z=15&l=map&size=600,400&pt={lon},{lat},pm2rdm"
-        ),
-        (
-            "https://staticmap.openstreetmap.de/staticmap.php"
-            f"?center={lat},{lon}&zoom=15&size=600x400&maptype=mapnik"
-            f"&markers={lat},{lon},red-pushpin"
-        ),
-    ]
-    headers = {"User-Agent": "TetraHydroGuildBot/1.0 (order map preview)"}
-    for url in urls:
-        try:
-            response = requests.get(url, timeout=15, headers=headers)
-            content_type = (response.headers.get("content-type") or "").lower()
-            if response.status_code == 200 and response.content and "image" in content_type:
-                return response.content
-            logging.warning(
-                "Location map fetch failed: status=%s type=%s url=%s",
-                response.status_code,
-                content_type,
-                url.split("?")[0],
-            )
-        except Exception as exc:
-            logging.warning("Failed to fetch location map from %s: %s", url.split("?")[0], exc)
     return None
 
 
@@ -1925,25 +1896,11 @@ async def send_order_message(
     chat_id: int,
     text: str,
     *,
-    map_png: Optional[bytes] = None,
+    coords: Optional[tuple] = None,
     reply_markup=None,
+    attach_telegram_location: bool = False,
 ) -> None:
-    """Send order text; attach a location map photo when provided (admin path)."""
-    if map_png and len(text) <= 1024:
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=BytesIO(map_png),
-            caption=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-        return
-    if map_png:
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=BytesIO(map_png),
-            caption="📍 Delivery location",
-        )
+    """Send order text; optionally follow with a native Telegram location pin."""
     await bot.send_message(
         chat_id=chat_id,
         text=text,
@@ -1951,13 +1908,19 @@ async def send_order_message(
         reply_markup=reply_markup,
         disable_web_page_preview=True,
     )
+    if attach_telegram_location and coords:
+        lat, lon = coords
+        try:
+            await bot.send_location(chat_id=chat_id, latitude=lat, longitude=lon)
+        except Exception as exc:
+            logging.warning("Failed to send Telegram location pin: %s", exc)
 
 
 async def notify_order_admins(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     *,
-    map_png: Optional[bytes] = None,
+    coords: Optional[tuple] = None,
     skip_user_id: Optional[int] = None,
 ) -> int:
     """Send the order to every configured admin. Returns count sent."""
@@ -1966,7 +1929,13 @@ async def notify_order_admins(
         if skip_user_id is not None and admin_id == skip_user_id:
             continue
         try:
-            await send_order_message(context.bot, admin_id, text, map_png=map_png)
+            await send_order_message(
+                context.bot,
+                admin_id,
+                text,
+                coords=coords,
+                attach_telegram_location=True,
+            )
             sent += 1
         except Exception as exc:
             logging.warning("Failed to deliver order to admin %s: %s", admin_id, exc)
@@ -2063,22 +2032,23 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
     order_text = build_order_placed_message(
         user, cart_items, price, discount_code, discount_percent, address, phone, invoice_id,
     )
-    map_png = fetch_location_map_png(address) if address else None
+    coords = parse_lat_lon_from_address(address) if address else None
     main_menu_kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
     )
     admin_ids = set(get_order_admin_ids())
     customer_is_admin = user.id in admin_ids
 
-    # One confirmation for the customer. If they are also an admin, attach the map
-    # so they don't get a second nearly-identical admin copy in the same chat.
+    # One confirmation for the customer. If they are also an admin, attach the
+    # Telegram location pin so they don't get a second nearly-identical admin copy.
     try:
         await send_order_message(
             context.bot,
             chat.id,
             order_text,
-            map_png=map_png if customer_is_admin else None,
+            coords=coords,
             reply_markup=main_menu_kb,
+            attach_telegram_location=customer_is_admin,
         )
     except Exception as exc:
         logging.warning("Customer order confirmation failed: %s", exc)
@@ -2092,7 +2062,7 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
     delivered = await notify_order_admins(
         context,
         order_text,
-        map_png=map_png,
+        coords=coords,
         skip_user_id=user.id if customer_is_admin else None,
     )
     if delivered == 0 and not customer_is_admin:
