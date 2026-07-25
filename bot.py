@@ -180,7 +180,7 @@ def extract_leading_emoji(name: str) -> str:
 
 
 def format_cart_item_block(item_num: int, item: dict) -> list[str]:
-    name = item.get("product_name", "Item")
+    name = html.escape(str(item.get("product_name", "Item") or "Item"))
     qty = item.get("qty", 0)
     price = format_price(item.get("line_price", 0.0))
     return [f"{item_num}) {name}", f"{qty}g = {price}"]
@@ -1386,17 +1386,28 @@ async def quantity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def open_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open cart as the latest messages in chat (works for any user, any source button)."""
     query = update.callback_query
     await query.answer()
-    user_data = context.user_data
-    cart_items = get_cart_items(user_data)
-    if not cart_items:
-        await query.edit_message_text(
-            "Your cart is empty.",
-            reply_markup=build_empty_cart_keyboard(),
-        )
-        return
-    await show_cart(update, context)
+    # Always re-send cart at the bottom. Editing the Shop footer / Main Menu message
+    # is brittle (photo captions, HTML, deleted msgs) and looked like a "broken cart"
+    # for non-admin testers who open Cart from the shop feed.
+    try:
+        await show_cart(update, context, refresh_at_bottom=True)
+    except Exception as exc:
+        logging.exception("open_cart failed: %s", exc)
+        chat = query.message.chat if query and query.message else update.effective_chat
+        cart_items = get_cart_items(context.user_data)
+        if not cart_items:
+            await chat.send_message(
+                "Your cart is empty.",
+                reply_markup=build_empty_cart_keyboard(),
+            )
+        else:
+            await chat.send_message(
+                "Could not open cart. Tap Reload Cart.",
+                reply_markup=build_empty_cart_keyboard(),
+            )
 
 def _resolve_chat(update_or_query):
     if hasattr(update_or_query, "effective_chat") and update_or_query.effective_chat:
@@ -1433,37 +1444,33 @@ async def _show_empty_cart(update_or_query, context: ContextTypes.DEFAULT_TYPE) 
     msg = "Your cart is empty."
     reply_markup = build_empty_cart_keyboard()
     await _delete_cart_delivery_message(context, user_data)
-    items_mid = user_data.pop("cart_items_message_id", None)
-    chat_id = user_data.get("cart_chat_id")
+    await _delete_cart_items_message(context, user_data)
 
-    if items_mid and chat_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=items_mid,
-                text=msg,
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception:
-            user_data.pop("cart_items_message_id", None)
+    chat = None
+    try:
+        chat = _resolve_chat(update_or_query)
+    except Exception:
+        pass
+    if chat is None and hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
+        chat = update_or_query.callback_query.message.chat
+    if chat is None and hasattr(update_or_query, "message") and update_or_query.message:
+        chat = update_or_query.message.chat
 
-    if hasattr(update_or_query, "edit_message_text"):
-        await update_or_query.edit_message_text(msg, reply_markup=reply_markup)
-    elif hasattr(update_or_query, "message") and update_or_query.message:
-        sent = await update_or_query.message.reply_text(msg, reply_markup=reply_markup)
+    if chat is not None:
+        sent = await chat.send_message(msg, reply_markup=reply_markup)
         user_data["cart_items_message_id"] = sent.message_id
         user_data["cart_chat_id"] = sent.chat_id
-    elif hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
-        query = update_or_query.callback_query
+        return
+
+    # Last-resort: try editing the callback message.
+    query = getattr(update_or_query, "callback_query", None) or (
+        update_or_query if hasattr(update_or_query, "edit_message_text") else None
+    )
+    if query is not None:
         try:
             await query.edit_message_text(msg, reply_markup=reply_markup)
-            user_data["cart_items_message_id"] = query.message.message_id
-            user_data["cart_chat_id"] = query.message.chat_id
         except Exception:
-            sent = await query.message.chat.send_message(msg, reply_markup=reply_markup)
-            user_data["cart_items_message_id"] = sent.message_id
-            user_data["cart_chat_id"] = sent.chat_id
+            pass
 
 
 def _is_not_modified_error(exc: Exception) -> bool:
@@ -2064,17 +2071,15 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
     order_text = build_order_placed_message(
         user, cart_items, price, discount_code, discount_percent, address, phone, invoice_id,
     )
-    # Admin: same text + Yandex map screenshot. Customer: same text, no screenshot.
-    map_png = fetch_yandex_map_png(address) if address else None
     main_menu_kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
     )
     admin_ids = set(get_order_admin_ids())
     customer_is_admin = user.id in admin_ids
 
-    # Customer confirmation — text only (no map photo).
-    # If the placer is also an admin, skip this plain copy and give them only the
-    # admin version below (with map), so the chat isn't flooded with duplicates.
+    # Customer confirmation FIRST (text only, no map) — never blocked by map fetch.
+    # If the placer is also an admin, skip this plain copy; they get the admin
+    # version below (with Yandex map) so the chat isn't flooded with duplicates.
     if not customer_is_admin:
         try:
             await send_order_message(
@@ -2086,15 +2091,24 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception as exc:
             logging.warning("Customer order confirmation failed: %s", exc)
-            await chat.send_message(
-                order_text,
-                reply_markup=main_menu_kb,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+            try:
+                await chat.send_message(
+                    order_text,
+                    reply_markup=main_menu_kb,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                await chat.send_message(
+                    "Order placed! Our team will contact you shortly.",
+                    reply_markup=main_menu_kb,
+                )
 
-    # Admin(s): text + Yandex screenshot. Include the placer when they are an admin
-    # (they get the map version as their single confirmation, with Main Menu).
+    # Fetch map AFTER customer is confirmed, so a slow/failed Yandex call
+    # cannot make checkout look broken for regular customers.
+    map_png = fetch_yandex_map_png(address) if address else None
+
+    # Admin(s): same text + Yandex screenshot.
     delivered = 0
     for admin_id in admin_ids:
         try:
@@ -2119,180 +2133,188 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
-    # Legacy: one product button -> single card (replaced by shop card feed)
-    # if data.startswith("select_"):
-    #     await select_product_handler(update, context)
-    if data.startswith("add_"):
-        await add_to_cart_handler(update, context)
-    elif data.startswith("qty_"):
-        await quantity_handler(update, context)
-    elif data == "open_cart":
-        await open_cart_handler(update, context)
-    elif data.startswith("cart_remove_"):
-        await remove_cart_item_handler(update, context)
-    elif data == "noop_qty_missing":
-        await query.answer("No price post for this product yet.", show_alert=True)
-    elif data == "menu_shop":
-        await menu_handler(update, context)
-    elif data == "main_menu":
-        await start(update, context)
-    elif data.startswith("giveaway_"):
-        giveaway_id = int(data.split("_")[1])
-        giveaways = get_active_giveaways()
-        giveaway = next((g for g in giveaways if g[0] == giveaway_id), None)
-        if not giveaway:
-            await query.edit_message_text("Giveaway not found!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]))
-            return
-        
-        # Show giveaway details
-        end_date = date.fromisoformat(giveaway[4])
-        days_left = (end_date - date.today()).days
-        message = f"🎁 **{giveaway[1]}**\n\n{giveaway[2]}\n\n🏆 **Prize:** {giveaway[3]}\n⏰ **Ends in:** {days_left} days\n📅 **End Date:** {giveaway[4]}"
-        
-        keyboard = [
-            [InlineKeyboardButton("🎯 Enter Giveaway", callback_data=f"enter_giveaway_{giveaway_id}")],
-            [InlineKeyboardButton("Back to Giveaways", callback_data="menu_giveaways"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
-    elif data.startswith("enter_giveaway_"):
-        giveaway_id = int(data.split("_")[2])
-        user_id = query.from_user.id
-        username = query.from_user.username or query.from_user.first_name or "Unknown"
-        
-        success, message = enter_giveaway(giveaway_id, user_id, username)
-        keyboard = [
-            [InlineKeyboardButton("Back to Giveaways", callback_data="menu_giveaways")],
-            [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, reply_markup=reply_markup)
-    elif data == "back_to_cart":
-        context.user_data["awaiting_address"] = False
-        context.user_data["awaiting_phone"] = False
-        context.user_data["awaiting_discount"] = False
-        # Always re-send cart at the bottom of the chat (delete old cart msgs first).
-        await show_cart(update, context, refresh_at_bottom=True)
-    elif data == "confirm_order":
-        await confirm_order_handler(update, context)
-    elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
-        await cart_handler(update, context)
-    elif data == "pay_telegram":
-        await query.answer()
-        user_data = context.user_data
-        cart_items = get_cart_items(user_data)
-        if not cart_items:
-            await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
-            return
-        price = sync_cart_price(user_data)
-        await start_telegram_payment(
-            context,
-            query.message.chat,
-            update.effective_user.id,
-            user_data,
-            cart_items,
-            price,
-        )
-    elif data == "pay_crypto":
-        await query.answer()
-        user_data = context.user_data
-        cart_items = get_cart_items(user_data)
-        if not cart_items:
-            await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
-            return
-        price = sync_cart_price(user_data)
-        await start_crypto_payment(
-            context,
-            query.message.chat,
-            update.effective_user.id,
-            user_data,
-            cart_items,
-            price,
-        )
-    elif data.startswith("check_crypto_"):
-        track_id = data[len("check_crypto_"):]
-        user_data = context.user_data
-        status_data = check_crypto_payment_invoice(track_id)
-        if is_crypto_payment_paid(status_data):
-            items = user_data.get("pending_items") or get_cart_items(user_data)
-            if not items:
-                await query.edit_message_text("Your cart is empty.")
+    try:
+        # Legacy: one product button -> single card (replaced by shop card feed)
+        # if data.startswith("select_"):
+        #     await select_product_handler(update, context)
+        if data.startswith("add_"):
+            await add_to_cart_handler(update, context)
+        elif data.startswith("qty_"):
+            await quantity_handler(update, context)
+        elif data == "open_cart":
+            await open_cart_handler(update, context)
+        elif data.startswith("cart_remove_"):
+            await remove_cart_item_handler(update, context)
+        elif data == "noop_qty_missing":
+            await query.answer("No price post for this product yet.", show_alert=True)
+        elif data == "menu_shop":
+            await menu_handler(update, context)
+        elif data == "main_menu":
+            await start(update, context)
+        elif data.startswith("giveaway_"):
+            giveaway_id = int(data.split("_")[1])
+            giveaways = get_active_giveaways()
+            giveaway = next((g for g in giveaways if g[0] == giveaway_id), None)
+            if not giveaway:
+                await query.edit_message_text("Giveaway not found!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]))
                 return
-            total_price = user_data.get("pending_price") or user_data.get("cart_price")
-            summary = fulfill_paid_cart(
-                update.effective_user.id,
-                items,
-                track_id,
-                user_data.get("cart_discount_code"),
-                user_data.get("cart_discount_percent", 0),
-                user_data.get("cart_referred_by"),
-                user_data.get("cart_address"),
-                user_data.get("cart_phone"),
-            )
-            if total_price is not None:
-                summary.append(f"\nTotal paid: {format_price(total_price)}")
-            await query.edit_message_text("\n".join(summary))
-            clear_cart_after_payment(context.user_data)
-        else:
-            await query.answer("Payment not detected yet. Wait a minute and try again.", show_alert=True)
-    elif data.startswith("check_"):
-        _, invoice_id, product_id = data.split("_")
-        user_data = context.user_data
-        status_data = check_crypto_payment_invoice(invoice_id)
-        if is_crypto_payment_paid(status_data):
-            items = user_data.get("pending_items") or get_cart_items(user_data)
-            if not items:
-                await query.edit_message_text("Your cart is empty.")
+        
+            # Show giveaway details
+            end_date = date.fromisoformat(giveaway[4])
+            days_left = (end_date - date.today()).days
+            message = f"🎁 **{giveaway[1]}**\n\n{giveaway[2]}\n\n🏆 **Prize:** {giveaway[3]}\n⏰ **Ends in:** {days_left} days\n📅 **End Date:** {giveaway[4]}"
+        
+            keyboard = [
+                [InlineKeyboardButton("🎯 Enter Giveaway", callback_data=f"enter_giveaway_{giveaway_id}")],
+                [InlineKeyboardButton("Back to Giveaways", callback_data="menu_giveaways"), InlineKeyboardButton("Main Menu", callback_data="main_menu")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+        elif data.startswith("enter_giveaway_"):
+            giveaway_id = int(data.split("_")[2])
+            user_id = query.from_user.id
+            username = query.from_user.username or query.from_user.first_name or "Unknown"
+        
+            success, message = enter_giveaway(giveaway_id, user_id, username)
+            keyboard = [
+                [InlineKeyboardButton("Back to Giveaways", callback_data="menu_giveaways")],
+                [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(message, reply_markup=reply_markup)
+        elif data == "back_to_cart":
+            context.user_data["awaiting_address"] = False
+            context.user_data["awaiting_phone"] = False
+            context.user_data["awaiting_discount"] = False
+            # Always re-send cart at the bottom of the chat (delete old cart msgs first).
+            await show_cart(update, context, refresh_at_bottom=True)
+        elif data == "confirm_order":
+            await confirm_order_handler(update, context)
+        elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
+            await cart_handler(update, context)
+        elif data == "pay_telegram":
+            await query.answer()
+            user_data = context.user_data
+            cart_items = get_cart_items(user_data)
+            if not cart_items:
+                await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
                 return
-            total_price = user_data.get("pending_price") or user_data.get("cart_price")
-            summary = fulfill_paid_cart(
+            price = sync_cart_price(user_data)
+            await start_telegram_payment(
+                context,
+                query.message.chat,
                 update.effective_user.id,
-                items,
-                invoice_id,
-                user_data.get("cart_discount_code"),
-                user_data.get("cart_discount_percent", 0),
-                user_data.get("cart_referred_by"),
-                user_data.get("cart_address"),
-                user_data.get("cart_phone"),
+                user_data,
+                cart_items,
+                price,
             )
-            if total_price is not None:
-                summary.append(f"\nTotal paid: {format_price(total_price)}")
-            await query.edit_message_text("\n".join(summary))
-            clear_cart_after_payment(context.user_data)
-        else:
-            await query.edit_message_text("Payment not detected yet. Please wait a minute and try again.")
-    elif data.startswith("menu_"):
-        await menu_handler(update, context)
-    elif data == "admin_panel":
-        await admin_panel_handler(update, context)
-    elif data == "admin_orders":
-        await admin_orders_handler(update, context)
-    elif data == "admin_giveaways":
-        await admin_giveaways_handler(update, context)
-    elif data == "admin_discount":
-        await admin_discount_handler(update, context)
-    elif data == "admin_stats":
-        await admin_stats_handler(update, context)
-    elif data == "admin_broadcast":
-        await admin_broadcast_handler(update, context)
-    elif data == "admin_giveaway_entries":
-        await admin_giveaway_entries_handler(update, context)
-    elif data.startswith("view_entries_"):
-        await view_entries_handler(update, context)
-    elif data.startswith("copy_entries_"):
-        giveaway_id = int(data.split("_")[2])
-        entries = get_giveaway_entries(giveaway_id)
-        giveaway = next((g for g in get_active_giveaways() if g[0] == giveaway_id), None)
-        if not giveaway:
-            await update.callback_query.edit_message_text("Giveaway not found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_giveaway_entries")]]))
-            return
+        elif data == "pay_crypto":
+            await query.answer()
+            user_data = context.user_data
+            cart_items = get_cart_items(user_data)
+            if not cart_items:
+                await query.edit_message_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
+                return
+            price = sync_cart_price(user_data)
+            await start_crypto_payment(
+                context,
+                query.message.chat,
+                update.effective_user.id,
+                user_data,
+                cart_items,
+                price,
+            )
+        elif data.startswith("check_crypto_"):
+            track_id = data[len("check_crypto_"):]
+            user_data = context.user_data
+            status_data = check_crypto_payment_invoice(track_id)
+            if is_crypto_payment_paid(status_data):
+                items = user_data.get("pending_items") or get_cart_items(user_data)
+                if not items:
+                    await query.edit_message_text("Your cart is empty.")
+                    return
+                total_price = user_data.get("pending_price") or user_data.get("cart_price")
+                summary = fulfill_paid_cart(
+                    update.effective_user.id,
+                    items,
+                    track_id,
+                    user_data.get("cart_discount_code"),
+                    user_data.get("cart_discount_percent", 0),
+                    user_data.get("cart_referred_by"),
+                    user_data.get("cart_address"),
+                    user_data.get("cart_phone"),
+                )
+                if total_price is not None:
+                    summary.append(f"\nTotal paid: {format_price(total_price)}")
+                await query.edit_message_text("\n".join(summary))
+                clear_cart_after_payment(context.user_data)
+            else:
+                await query.answer("Payment not detected yet. Wait a minute and try again.", show_alert=True)
+        elif data.startswith("check_"):
+            _, invoice_id, product_id = data.split("_")
+            user_data = context.user_data
+            status_data = check_crypto_payment_invoice(invoice_id)
+            if is_crypto_payment_paid(status_data):
+                items = user_data.get("pending_items") or get_cart_items(user_data)
+                if not items:
+                    await query.edit_message_text("Your cart is empty.")
+                    return
+                total_price = user_data.get("pending_price") or user_data.get("cart_price")
+                summary = fulfill_paid_cart(
+                    update.effective_user.id,
+                    items,
+                    invoice_id,
+                    user_data.get("cart_discount_code"),
+                    user_data.get("cart_discount_percent", 0),
+                    user_data.get("cart_referred_by"),
+                    user_data.get("cart_address"),
+                    user_data.get("cart_phone"),
+                )
+                if total_price is not None:
+                    summary.append(f"\nTotal paid: {format_price(total_price)}")
+                await query.edit_message_text("\n".join(summary))
+                clear_cart_after_payment(context.user_data)
+            else:
+                await query.edit_message_text("Payment not detected yet. Please wait a minute and try again.")
+        elif data.startswith("menu_"):
+            await menu_handler(update, context)
+        elif data == "admin_panel":
+            await admin_panel_handler(update, context)
+        elif data == "admin_orders":
+            await admin_orders_handler(update, context)
+        elif data == "admin_giveaways":
+            await admin_giveaways_handler(update, context)
+        elif data == "admin_discount":
+            await admin_discount_handler(update, context)
+        elif data == "admin_stats":
+            await admin_stats_handler(update, context)
+        elif data == "admin_broadcast":
+            await admin_broadcast_handler(update, context)
+        elif data == "admin_giveaway_entries":
+            await admin_giveaway_entries_handler(update, context)
+        elif data.startswith("view_entries_"):
+            await view_entries_handler(update, context)
+        elif data.startswith("copy_entries_"):
+            giveaway_id = int(data.split("_")[2])
+            entries = get_giveaway_entries(giveaway_id)
+            giveaway = next((g for g in get_active_giveaways() if g[0] == giveaway_id), None)
+            if not giveaway:
+                await update.callback_query.edit_message_text("Giveaway not found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_giveaway_entries")]]))
+                return
         
-        numbered_list = ""
-        for i, entry in enumerate(entries, 1):
-            username = entry[1] if entry[1] else f"User{entry[0]}"
-            numbered_list += f"{i}. @{username}\n"
+            numbered_list = ""
+            for i, entry in enumerate(entries, 1):
+                username = entry[1] if entry[1] else f"User{entry[0]}"
+                numbered_list += f"{i}. @{username}\n"
         
-        await update.callback_query.edit_message_text(numbered_list, parse_mode='Markdown')
+            await update.callback_query.edit_message_text(numbered_list, parse_mode='Markdown')
+
+    except Exception as exc:
+        logging.exception("Callback handler failed for data=%r: %s", data, exc)
+        try:
+            await query.answer("Something went wrong. Try again.", show_alert=True)
+        except Exception:
+            pass
 
 async def orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
