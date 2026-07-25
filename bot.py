@@ -1820,12 +1820,24 @@ async def send_payment_step(chat, user_data: dict, price: float) -> None:
 
 
 def format_customer_label(user) -> str:
+    """Customer name as a clickable Telegram profile link + numeric id."""
+    uid = getattr(user, "id", None)
     name = getattr(user, "full_name", None) or getattr(user, "first_name", None)
-    if not name and getattr(user, "username", None):
-        name = f"@{user.username}"
+    username = getattr(user, "username", None)
+    if not name and username:
+        name = f"@{username}"
     if not name:
-        name = str(getattr(user, "id", "?"))
-    return f"{html.escape(str(name))} (id <code>{getattr(user, 'id', '?')}</code>)"
+        name = str(uid or "?")
+    safe_name = html.escape(str(name))
+    if username:
+        href = f"https://t.me/{username}"
+    elif uid:
+        href = f"tg://user?id={uid}"
+    else:
+        return f"{safe_name} (id <code>?</code>)"
+    link = f'<a href="{html.escape(href)}">{safe_name}</a>'
+    id_part = f"(id <code>{uid}</code>)" if uid is not None else ""
+    return f"{link} {id_part}".strip()
 
 
 def format_location_line(address) -> str:
