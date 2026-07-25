@@ -429,7 +429,11 @@ def build_phone_reply_keyboard() -> ReplyKeyboardMarkup:
 
 
 def is_desktop_or_web_telegram(update: Update) -> bool:
-    """Best-effort: Telegram Bot API does not expose client platform directly."""
+    """Best-effort desktop/web detection.
+
+    The Bot API does NOT expose the client platform, so this almost always
+    returns False. Do not rely on it alone to hide UI.
+    """
     user = update.effective_user
     if user and user.api_kwargs:
         client = str(user.api_kwargs.get("client_type") or user.api_kwargs.get("platform") or "").lower()
@@ -439,6 +443,14 @@ def is_desktop_or_web_telegram(update: Update) -> bool:
 
 
 def should_offer_gps_reply_keyboard(user_data: dict, update: Update) -> bool:
+    """Show "use my current location" only when GPS already worked for this user.
+
+    Telegram does not tell us mobile vs desktop, so we cannot safely show the
+    GPS button to first-time visitors (it appears on Desktop too and is useless
+    there). After a successful location pin share we treat the user as
+    GPS-capable (almost always mobile) and offer the shortcut next time.
+    Users who only paste Google Maps links never see the button.
+    """
     if is_desktop_or_web_telegram(update):
         return False
     if user_data.get("is_text_location_user"):
@@ -449,8 +461,12 @@ def should_offer_gps_reply_keyboard(user_data: dict, update: Update) -> bool:
 def build_location_prompt_text(include_gps_button: bool) -> str:
     base = "Please set your 📍 location for delivery, before checkout.\n"
     if include_gps_button:
-        return base + 'Use 📎 button for pin location or "use my current location" button'
-    return base + "Use 📎 button for pin location or paste a Google Maps link."
+        return (
+            base
+            + 'Use 📎 to attach a pin, paste a Google Maps link, '
+            + 'or tap "use my current location".'
+        )
+    return base + "Use 📎 to attach a pin location, or paste a Google Maps link."
 
 
 async def send_shop_header(chat) -> None:
@@ -474,16 +490,17 @@ async def send_phone_prompt(chat, user_data: dict) -> None:
 
 
 async def send_location_prompt(chat, user_data: dict, update: Update) -> None:
+    """Ask for delivery location.
+
+    Default (desktop-safe): text only — 📎 pin or Google Maps link.
+    GPS button: only if this user already shared a live location pin before.
+    """
     user_data["awaiting_address"] = True
     user_data["awaiting_phone"] = False
     user_data["awaiting_discount"] = False
     show_gps = should_offer_gps_reply_keyboard(user_data, update)
     text = build_location_prompt_text(show_gps)
     reply_markup = build_location_reply_keyboard() if show_gps else None
-    if not show_gps and not is_desktop_or_web_telegram(update):
-        reply_markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("use my current location", callback_data="show_location_keyboard")]]
-        )
     await chat.send_message(text, reply_markup=reply_markup)
 
 
