@@ -232,10 +232,18 @@ def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
     address = user_data.get("cart_address")
     phone = user_data.get("cart_phone")
     lines = ["Delivery details:", ""]
-    lines.append(f"📍 Location: {html.escape(address) if address else '— not set —'}")
+    if address:
+        url = html.escape(str(address).strip())
+        lines.append(f'📍 Location: <a href="{url}">Show on map-></a>')
+    else:
+        lines.append("📍 Location: — not set —")
     lines.append(f"📞 Phone: {html.escape(phone) if phone else '— not set —'}")
     lines.append("")
-    lines.append("Set your location (required) and phone, then tap Checkout.")
+    lines.append(
+        "Set your location (required) and mobile phone, so the delivery person can call you."
+    )
+    lines.append("")
+    lines.append("Then tap Checkout.")
     return "\n".join(lines)
 
 
@@ -1520,7 +1528,12 @@ async def show_cart(
         await _delete_cart_items_message(context, user_data)
         await _delete_cart_delivery_message(context, user_data)
         sent_items = await chat.send_message(items_msg, reply_markup=remove_kb, parse_mode="HTML")
-        sent_delivery = await chat.send_message(delivery_msg, reply_markup=delivery_kb, parse_mode="HTML")
+        sent_delivery = await chat.send_message(
+            delivery_msg,
+            reply_markup=delivery_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
         user_data["cart_items_message_id"] = sent_items.message_id
         user_data["cart_delivery_message_id"] = sent_delivery.message_id
         return
@@ -1579,6 +1592,7 @@ async def show_cart(
                 text=delivery_msg,
                 reply_markup=delivery_kb,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             delivery_ok = True
         except Exception as exc:
@@ -1588,7 +1602,12 @@ async def show_cart(
                 user_data.pop("cart_delivery_message_id", None)
 
     if not delivery_ok:
-        sent_delivery = await chat.send_message(delivery_msg, reply_markup=delivery_kb, parse_mode="HTML")
+        sent_delivery = await chat.send_message(
+            delivery_msg,
+            reply_markup=delivery_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
         user_data["cart_delivery_message_id"] = sent_delivery.message_id
 
 
@@ -1929,15 +1948,13 @@ def build_order_placed_message(
     invoice_id: str,
 ) -> str:
     """Single order message used for both customer confirmation and admin notify."""
+    sep = "- - - - - - - - - - - - - - - - - - -"
     lines = [
         "🛒 <b>NEW ORDER</b>",
-        "",
+        sep,
         f"Order: <code>{html.escape(str(invoice_id))}</code>",
         f"Customer: {format_customer_label(user)}",
-        "",
-        "✅ Order placed! Our team will contact you shortly.",
-        "",
-        "- - - - - - - - - - - - - - - - - - -",
+        sep,
         "",
     ]
     for idx, item in enumerate(cart_items, start=1):
@@ -1948,11 +1965,18 @@ def build_order_placed_message(
     if discount_percent:
         lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
     lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
+    lines.append("")
     if address:
-        lines.append("")
         lines.append(format_location_line(address))
+    else:
+        lines.append("📍 Location: — not set —")
     if phone:
         lines.append(f"📞 Phone: {html.escape(str(phone))}")
+    else:
+        lines.append("📞 Phone: — not set —")
+    lines.append(sep)
+    lines.append("")
+    lines.append("✅ Order placed! Our team will contact you shortly!")
     return "\n".join(lines)
 
 
