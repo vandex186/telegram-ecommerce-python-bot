@@ -240,10 +240,10 @@ def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
     lines.append(f"📞 Phone: {html.escape(phone) if phone else '— not set —'}")
     lines.append("")
     lines.append(
-        "Set your location (required) and mobile phone, so the delivery person can call you."
+        "Set your location and mobile phone, so the delivery person can call you."
     )
     lines.append("")
-    lines.append("Then tap Checkout.")
+    lines.append("Then tap ✅ Checkout.")
     return "\n".join(lines)
 
 
@@ -467,14 +467,13 @@ def should_offer_gps_reply_keyboard(user_data: dict, update: Update) -> bool:
 
 
 def build_location_prompt_text(include_gps_button: bool) -> str:
-    base = "Please set your 📍 location for delivery, before checkout.\n"
+    text = (
+        "Please set your location for delivery, before checkout.\n"
+        "👇 Use this 📎 button to add 📍Location"
+    )
     if include_gps_button:
-        return (
-            base
-            + 'Use 📎 to attach a pin, paste a Google Maps link, '
-            + 'or tap "use my current location".'
-        )
-    return base + "Use 📎 to attach a pin location, or paste a Google Maps link."
+        return text + '\nor tap "use my current location".'
+    return text
 
 
 async def send_shop_header(chat) -> None:
@@ -1951,7 +1950,7 @@ def build_order_placed_message(
     sep = "- - - - - - - - - - - - - - - - - - -"
     lines = [
         "🛒 <b>NEW ORDER</b>",
-        sep,
+        "",
         f"Order: <code>{html.escape(str(invoice_id))}</code>",
         f"Customer: {format_customer_label(user)}",
         sep,
@@ -1965,7 +1964,7 @@ def build_order_placed_message(
     if discount_percent:
         lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
     lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
-    lines.append("")
+    lines.append(sep)
     if address:
         lines.append(format_location_line(address))
     else:
@@ -1975,8 +1974,11 @@ def build_order_placed_message(
     else:
         lines.append("📞 Phone: — not set —")
     lines.append(sep)
+    lines.append("✅ Order placed! Our team will contact you shortly.")
     lines.append("")
-    lines.append("✅ Order placed! Our team will contact you shortly!")
+    lines.append("‼️ <b>NOTE:</b>")
+    lines.append("We not save info about your orders nowhere.")
+    lines.append("Please, Forward this message to your Saved Messages for saving!!!")
     return "\n".join(lines)
 
 
