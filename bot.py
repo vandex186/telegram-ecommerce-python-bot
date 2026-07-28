@@ -226,11 +226,21 @@ def build_cart_items_message(user_data: dict) -> str:
     return "\n".join(lines)
 
 
+def build_discount_line(discount_code, discount_percent: int) -> str:
+    """🏷 discount row; link has no preview when disable_web_page_preview=True."""
+    if discount_percent:
+        return f"🏷 Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})"
+    return (
+        f'🏷 Discount: No | <a href="{html.escape(DISCOUNT_GUIDE_URL)}">How to get</a> ->'
+    )
+
+
 def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
     """Delivery summary + checkout prompt shown under the cart items."""
     user_data = user_data or {}
     address = user_data.get("cart_address")
     phone = user_data.get("cart_phone")
+    discount_code, discount_percent = get_effective_discount(user_data)
     lines = ["Delivery details:", ""]
     if address:
         url = html.escape(str(address).strip())
@@ -238,6 +248,7 @@ def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
     else:
         lines.append("📍 Location: — not set —")
     lines.append(f"📞 Phone: {html.escape(phone) if phone else '— not set —'}")
+    lines.append(build_discount_line(discount_code, discount_percent))
     lines.append("")
     lines.append(
         "Set your location and mobile phone, so the delivery person can call you."
@@ -267,10 +278,7 @@ def build_checkout_review_message(user_data: dict, total: float) -> str:
         if idx < len(cart_items):
             lines.append("")
     lines.append("")
-    if discount_percent:
-        lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
-    else:
-        lines.append(f'Discount: No | <a href="{DISCOUNT_GUIDE_URL}">How to get</a> ->')
+    lines.append(build_discount_line(discount_code, discount_percent))
     lines.append("")
     lines.append(f"Total: <b>{html.escape(amount)}</b>")
     return "\n".join(lines)
@@ -1855,6 +1863,7 @@ async def send_payment_step(chat, user_data: dict, price: float) -> None:
         build_payment_step_message(user_data, price),
         reply_markup=build_payment_step_keyboard(),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -1952,23 +1961,16 @@ def build_order_placed_message(
 ) -> str:
     """Single order message used for both customer confirmation and admin notify."""
     sep = "- - - - - - - - - - - - - - - - - - -"
+    total_tail = " - - - - - - - - - - -"
+    amount = format_price(price)
     lines = [
         "🛒 <b>NEW ORDER</b>",
         "",
         f"Order: <code>{html.escape(str(invoice_id))}</code>",
-        f"Customer: {format_customer_label(user)}",
-        sep,
+        "",
+        f"🌬 Customer: {format_customer_label(user)}",
         "",
     ]
-    for idx, item in enumerate(cart_items, start=1):
-        lines.extend(format_cart_item_block(idx, item))
-        if idx < len(cart_items):
-            lines.append("")
-    lines.append("")
-    if discount_percent:
-        lines.append(f"Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})")
-    lines.append(f"Total: <b>{html.escape(format_price(price))}</b>")
-    lines.append(sep)
     if address:
         lines.append(format_location_line(address))
     else:
@@ -1977,12 +1979,21 @@ def build_order_placed_message(
         lines.append(f"📞 Phone: {html.escape(str(phone))}")
     else:
         lines.append("📞 Phone: — not set —")
+    lines.append(build_discount_line(discount_code, discount_percent))
+    lines.append("")
     lines.append(sep)
+    lines.append("")
+    for idx, item in enumerate(cart_items, start=1):
+        lines.extend(format_cart_item_block(idx, item))
+        if idx < len(cart_items):
+            lines.append("")
+    lines.append("")
+    lines.append(f"TOTAL: <b>{html.escape(amount)}</b>{total_tail}")
+    lines.append("")
     lines.append("✅ Order placed! Our team will contact you shortly.")
     lines.append("")
-    lines.append("‼️ <b>NOTE:</b>")
-    lines.append("We not save info about your orders nowhere.")
-    lines.append("Please, Forward this message to your Saved Messages for saving!!!")
+    lines.append("‼️ NOTE: Forward this message to your Saved Messages for saving!!!")
+    lines.append("We not save info about orders")
     return "\n".join(lines)
 
 
@@ -2074,6 +2085,7 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await chat.send_message(
         build_checkout_review_message(user_data, price),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
     # Automated payment path (only when explicitly enabled and configured).
