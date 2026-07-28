@@ -370,14 +370,18 @@ def build_cart_footer_keyboard(user_data: Optional[dict] = None) -> InlineKeyboa
     user_data = user_data or {}
     has_address = bool(user_data.get("cart_address"))
     has_phone = bool(user_data.get("cart_phone"))
+    has_code = bool(user_data.get("cart_discount_code") or user_data.get("cart_referred_by"))
     location_label = "📍 Change Location" if has_address else "📍 Set Location"
-    phone_label = "📞 Change Phone" if has_phone else "📞 Set Phone"
+    phone_label = "📱 Change Phone" if has_phone else "📱 Set Phone"
+    code_label = "🏷 Change Code" if has_code else "🏷 Set Code"
     return InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton(location_label, callback_data="enter_address"),
+                InlineKeyboardButton(phone_label, callback_data="enter_phone"),
+                InlineKeyboardButton(code_label, callback_data="enter_discount"),
+            ],
             [InlineKeyboardButton("✅ Checkout", callback_data="checkout")],
-            [InlineKeyboardButton(location_label, callback_data="enter_address")],
-            [InlineKeyboardButton(phone_label, callback_data="enter_phone")],
-            [InlineKeyboardButton("🏷️ Discount / Referral code", callback_data="enter_discount")],
             [
                 InlineKeyboardButton("Shop", callback_data="menu_shop"),
                 InlineKeyboardButton("Main Menu", callback_data="main_menu"),
