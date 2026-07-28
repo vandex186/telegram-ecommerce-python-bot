@@ -18,7 +18,19 @@ services:
         value: "100"
       - key: CATALOG_SYNC_INTERVAL_MINUTES
         value: "5"
+      - key: DATABASE_FILE
+        value: "/data/orders.db"
+      - key: USDT_WALLET
+        sync: false
+      - key: USDT_NETWORK
+        value: "TRC20"
+      - key: PAYMENT_QR_DIR
+        value: "payment_qr/local"
+      - key: PAYMENT_QR_LABEL
+        value: "Local QR"
       - key: OXAPAY_API_KEY
         sync: false
       - key: TZ
         value: UTC
+    # Attach a persistent Disk in the Render dashboard (mount path /data)
+    # so orders.db survives redeploys.

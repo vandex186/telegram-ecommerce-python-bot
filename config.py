@@ -43,13 +43,22 @@ def _env_int_list(name: str) -> list:
 # Required: Telegram bot token from @BotFather
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# Payment is intentionally disabled for now (catalog + cart only).
+# Payment is intentionally disabled for OxaPay/Telegram Pay auto-invoices.
+# Manual checkout uses USDT wallet + local QR screenshots instead (see PAYMENT_*).
 ENABLE_PAYMENTS = _env_bool("ENABLE_PAYMENTS", False)
 OXAPAY_API_KEY = os.getenv("OXAPAY_API_KEY", "")
 OXAPAY_SANDBOX = _env_bool("OXAPAY_SANDBOX", True)
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 PAYMENT_CURRENCY = os.getenv("PAYMENT_CURRENCY", "USD")
 ENABLE_TELEGRAM_PAY = _env_bool("ENABLE_TELEGRAM_PAY", False)
+
+# Manual payment: USDT wallet (crypto) + local QR codes by amount.
+USDT_WALLET = os.getenv("USDT_WALLET", "").strip()
+USDT_NETWORK = os.getenv("USDT_NETWORK", "TRC20").strip() or "TRC20"
+USDT_QR_IMAGE = os.getenv("USDT_QR_IMAGE", "payment_qr/usdt.png").strip()
+# Folder with QR images named by amount: 30.png, 40.png, 50.png, ...
+PAYMENT_QR_DIR = os.getenv("PAYMENT_QR_DIR", "payment_qr/local").strip() or "payment_qr/local"
+PAYMENT_QR_LABEL = os.getenv("PAYMENT_QR_LABEL", "Local QR").strip() or "Local QR"
 
 # Your numeric Telegram user ID (e.g. from @userinfobot)
 ADMIN_USER_ID = _env_int("ADMIN_USER_ID", 123456789) or 123456789
@@ -58,9 +67,7 @@ ADMIN_USER_ID = _env_int("ADMIN_USER_ID", 123456789) or 123456789
 # Each recipient must have opened a private chat with the bot at least once.
 ORDER_ADMIN_IDS = _env_int_list("ORDER_ADMIN_IDS") or [ADMIN_USER_ID]
 
-# Text shown to the customer on the payment step before the order is placed.
-# Leave empty to show the default "manual payment" placeholder message.
-# This is the seam where a real payment integration plugs in later.
+# Legacy text (optional override). Prefer USDT_WALLET + PAYMENT_QR_DIR for checkout.
 PAYMENT_INSTRUCTIONS = os.getenv("PAYMENT_INSTRUCTIONS", "")
 
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@your_support_handle")

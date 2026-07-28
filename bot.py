@@ -227,12 +227,9 @@ def build_cart_items_message(user_data: dict) -> str:
 
 
 def build_discount_line(discount_code, discount_percent: int) -> str:
-    """🏷 discount row; link has no preview when disable_web_page_preview=True."""
     if discount_percent:
         return f"🏷 Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})"
-    return (
-        f'🏷 Discount: No | <a href="{html.escape(DISCOUNT_GUIDE_URL)}">How to get</a> ->'
-    )
+    return "🏷 Discount: No"
 
 
 def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
@@ -268,9 +265,9 @@ def build_checkout_review_message(user_data: dict, total: float) -> str:
     discount_code, discount_percent = get_effective_discount(user_data)
     amount = format_price(total)
     lines = [
-        "Let's check your order before confirmation",
+        "Let's check your order before payment",
         "",
-        f"{amount} INVOICE",
+        f"Total: <b>{html.escape(amount)}</b>",
         "",
     ]
     for idx, item in enumerate(cart_items, start=1):
@@ -603,8 +600,20 @@ logging.basicConfig(
 for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.Updater"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
+
+def get_db_path() -> str:
+    """SQLite path for orders. Use DATABASE_FILE on a persistent disk in production
+    (e.g. Render Disk mounted at /data → DATABASE_FILE=/data/orders.db)."""
+    raw = getattr(config, "DATABASE_FILE", None) or "orders.db"
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 def init_db():
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -619,12 +628,27 @@ def init_db():
         discount_percent INTEGER,
         referred_by TEXT,
         address TEXT,
-        phone TEXT
+        phone TEXT,
+        customer_name TEXT,
+        customer_username TEXT,
+        payment_method TEXT,
+        payment_status TEXT,
+        payment_screenshot_file_id TEXT,
+        order_total REAL
     )''')
-    try:
-        c.execute("ALTER TABLE orders ADD COLUMN phone TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for col_def in (
+        "phone TEXT",
+        "customer_name TEXT",
+        "customer_username TEXT",
+        "payment_method TEXT",
+        "payment_status TEXT",
+        "payment_screenshot_file_id TEXT",
+        "order_total REAL",
+    ):
+        try:
+            c.execute(f"ALTER TABLE orders ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
     c.execute('''CREATE TABLE IF NOT EXISTS discount_codes (
         code TEXT PRIMARY KEY,
         percent INTEGER,
@@ -644,18 +668,48 @@ def save_order(
     referred_by=None,
     address=None,
     phone=None,
+    customer_name=None,
+    customer_username=None,
+    payment_method=None,
+    payment_status=None,
+    payment_screenshot_file_id=None,
+    order_total=None,
 ):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute(
-        "INSERT INTO orders (timestamp, user_id, product_id, product_name, quantity, price, invoice_id, discount_code, discount_percent, referred_by, address, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (datetime.now().isoformat(), user_id, product["id"], product["name"], quantity, price, invoice_id, discount_code, discount_percent, referred_by, address, phone),
+        """INSERT INTO orders (
+            timestamp, user_id, product_id, product_name, quantity, price, invoice_id,
+            discount_code, discount_percent, referred_by, address, phone,
+            customer_name, customer_username, payment_method, payment_status,
+            payment_screenshot_file_id, order_total
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            datetime.now().isoformat(),
+            user_id,
+            product["id"],
+            product["name"],
+            quantity,
+            price,
+            invoice_id,
+            discount_code,
+            discount_percent,
+            referred_by,
+            address,
+            phone,
+            customer_name,
+            customer_username,
+            payment_method,
+            payment_status,
+            payment_screenshot_file_id,
+            order_total,
+        ),
     )
     conn.commit()
     conn.close()
 
 def get_recent_orders(limit=10):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT timestamp, user_id, product_id, product_name, quantity, price, invoice_id, discount_code, discount_percent, referred_by, address, phone FROM orders ORDER BY id DESC LIMIT ?", (limit,))
     rows = c.fetchall()
@@ -663,14 +717,14 @@ def get_recent_orders(limit=10):
     return rows
 
 def add_discount_code(code, percent, expires):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("REPLACE INTO discount_codes (code, percent, expires) VALUES (?, ?, ?)", (code.upper(), percent, expires))
     conn.commit()
     conn.close()
 
 def get_discount_code(code):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT code, percent, expires FROM discount_codes WHERE code = ?", (code.upper(),))
     row = c.fetchone()
@@ -691,7 +745,7 @@ def get_referrer_from_code(code):
     return None
 
 def init_giveaway_db():
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS giveaways (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -715,7 +769,7 @@ def init_giveaway_db():
     conn.close()
 
 def create_giveaway(title, description, end_date, max_entries=100):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     start_date = date.today().isoformat()
     c.execute("INSERT INTO giveaways (title, description, prize, start_date, end_date, max_entries) VALUES (?, ?, ?, ?, ?, ?)",
@@ -726,7 +780,7 @@ def create_giveaway(title, description, end_date, max_entries=100):
     return giveaway_id
 
 def get_active_giveaways():
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT id, title, description, prize, start_date, end_date, max_entries FROM giveaways WHERE is_active = 1 AND end_date > ? ORDER BY end_date ASC", (date.today().isoformat(),))
     rows = c.fetchall()
@@ -734,7 +788,7 @@ def get_active_giveaways():
     return rows
 
 def enter_giveaway(giveaway_id, user_id, username):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     # Check if user already entered
     c.execute("SELECT id FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?", (giveaway_id, user_id))
@@ -769,7 +823,7 @@ def enter_giveaway(giveaway_id, user_id, username):
     return True, "Successfully entered the giveaway! Good luck!"
 
 def get_giveaway_entries(giveaway_id):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT user_id, username, entry_date FROM giveaway_entries WHERE giveaway_id = ? ORDER BY entry_date ASC", (giveaway_id,))
     rows = c.fetchall()
@@ -777,7 +831,7 @@ def get_giveaway_entries(giveaway_id):
     return rows
 
 def get_all_users():
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT DISTINCT user_id FROM orders")
     rows = c.fetchall()
@@ -785,7 +839,7 @@ def get_all_users():
     return [row[0] for row in rows]
 
 def save_broadcast_message(message_text, sent_by):
-    conn = sqlite3.connect("orders.db")
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS broadcast_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1083,6 +1137,9 @@ def clear_cart_after_payment(user_data: dict) -> None:
         "awaiting_phone",
         "awaiting_address",
         "awaiting_discount",
+        "awaiting_payment_proof",
+        "payment_method",
+        "payment_qr_amount",
         "cart_items_message_id",
         "cart_delivery_message_id",
         "cart_chat_id",
@@ -1829,42 +1886,172 @@ def get_payment_instructions() -> str:
     return (getattr(config, "PAYMENT_INSTRUCTIONS", "") or "").strip()
 
 
-def build_payment_step_message(user_data: dict, price: float) -> str:
-    """Customer-facing payment step. This is the seam where a real payment
-    integration plugs in later; for now it shows manual instructions and the
-    order is placed once the customer confirms."""
-    amount = format_price(price)
-    lines = [f"Amount to pay: <b>{html.escape(amount)}</b>", ""]
-    instructions = get_payment_instructions()
-    if instructions:
-        lines.append(html.escape(instructions))
-    else:
-        lines.append("Payment is arranged manually for now.")
-        lines.append(
-            "Tap “Confirm & send order” to place your order — our team will "
-            "contact you to arrange payment and delivery."
-        )
-    lines.append("")
-    lines.append("Once you confirm, your order is sent to our team.")
-    return "\n".join(lines)
+def project_path(rel: str) -> Path:
+    p = Path(rel)
+    if p.is_absolute():
+        return p
+    return Path(__file__).resolve().parent / p
 
 
-def build_payment_step_keyboard() -> InlineKeyboardMarkup:
+def list_local_qr_options() -> list:
+    """Return sorted [(amount_int, path), ...] from PAYMENT_QR_DIR (30.png, 50.jpg, ...)."""
+    qr_dir = project_path(getattr(config, "PAYMENT_QR_DIR", "payment_qr/local"))
+    if not qr_dir.is_dir():
+        return []
+    options = []
+    for path in qr_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            continue
+        try:
+            amount = int(path.stem)
+        except ValueError:
+            continue
+        if amount > 0:
+            options.append((amount, path))
+    options.sort(key=lambda x: x[0])
+    return options
+
+
+def match_local_qr_for_amount(price: float) -> Optional[tuple]:
+    """Pick smallest QR amount >= order total. Falls back to largest if none cover it."""
+    options = list_local_qr_options()
+    if not options:
+        return None
+    rounded = int(round(float(price)))
+    for amount, path in options:
+        if amount >= rounded:
+            return amount, path
+    return options[-1]
+
+
+def usdt_qr_path() -> Optional[Path]:
+    raw = getattr(config, "USDT_QR_IMAGE", "payment_qr/usdt.png") or ""
+    if not raw.strip():
+        return None
+    path = project_path(raw.strip())
+    return path if path.is_file() else None
+
+
+def build_payment_method_keyboard() -> InlineKeyboardMarkup:
+    qr_label = getattr(config, "PAYMENT_QR_LABEL", "Local QR") or "Local QR"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Confirm & send order", callback_data="confirm_order")],
+            [InlineKeyboardButton("💎 Pay with USDT", callback_data="pay_usdt")],
+            [InlineKeyboardButton(f"📱 Pay with {qr_label}", callback_data="pay_local_qr")],
             [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
         ]
     )
 
 
-async def send_payment_step(chat, user_data: dict, price: float) -> None:
+async def send_payment_method_choice(chat, price: float) -> None:
     await chat.send_message(
-        build_payment_step_message(user_data, price),
-        reply_markup=build_payment_step_keyboard(),
+        f"Amount to pay: <b>{html.escape(format_price(price))}</b>\n\n"
+        "Choose payment method:",
+        reply_markup=build_payment_method_keyboard(),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+async def send_usdt_payment_instructions(chat, user_data: dict, price: float) -> None:
+    wallet = (getattr(config, "USDT_WALLET", "") or "").strip()
+    network = (getattr(config, "USDT_NETWORK", "TRC20") or "TRC20").strip()
+    if not wallet:
+        await chat.send_message(
+            "USDT payments are not configured yet.\n"
+            "Admin: set USDT_WALLET in Environment / .env.",
+            reply_markup=build_payment_method_keyboard(),
+        )
+        return
+    user_data["payment_method"] = "USDT"
+    user_data["awaiting_payment_proof"] = True
+    user_data["awaiting_address"] = False
+    user_data["awaiting_phone"] = False
+    user_data["awaiting_discount"] = False
+    caption = (
+        f"💎 <b>USDT payment</b>\n\n"
+        f"Amount: <b>{html.escape(format_price(price))}</b>\n"
+        f"Network: <code>{html.escape(network)}</code>\n"
+        f"Wallet:\n<code>{html.escape(wallet)}</code>\n\n"
+        "1. Send the exact amount to this wallet\n"
+        "2. Send a <b>screenshot</b> of the payment here\n"
+        "3. We will confirm and process your order"
+    )
+    qr = usdt_qr_path()
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⬅️ Change method", callback_data="pay_choose")],
+            [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
+        ]
+    )
+    if qr:
+        with qr.open("rb") as photo:
+            await chat.send_photo(photo=photo, caption=caption, parse_mode="HTML", reply_markup=kb)
+    else:
+        await chat.send_message(caption, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+
+async def send_local_qr_payment_instructions(chat, user_data: dict, price: float) -> None:
+    matched = match_local_qr_for_amount(price)
+    label = getattr(config, "PAYMENT_QR_LABEL", "Local QR") or "Local QR"
+    if not matched:
+        await chat.send_message(
+            f"{label} payments are not configured yet.\n"
+            "Admin: put QR images in payment_qr/local/ named by amount "
+            "(e.g. 30.png, 50.png, 100.png).",
+            reply_markup=build_payment_method_keyboard(),
+        )
+        return
+    qr_amount, qr_path = matched
+    user_data["payment_method"] = "LOCAL_QR"
+    user_data["payment_qr_amount"] = qr_amount
+    user_data["awaiting_payment_proof"] = True
+    user_data["awaiting_address"] = False
+    user_data["awaiting_phone"] = False
+    user_data["awaiting_discount"] = False
+    order_amount = format_price(price)
+    note = ""
+    if abs(float(qr_amount) - float(price)) >= 0.01:
+        note = (
+            f"\n\n⚠️ Closest QR is <b>{html.escape(format_price(qr_amount))}</b> "
+            f"for your order of <b>{html.escape(order_amount)}</b>. "
+            "Pay the QR amount shown."
+        )
+    caption = (
+        f"📱 <b>{html.escape(label)}</b>\n\n"
+        f"Order total: <b>{html.escape(order_amount)}</b>\n"
+        f"Pay: <b>{html.escape(format_price(qr_amount))}</b>\n"
+        f"{note}\n\n"
+        "1. Scan the QR and pay\n"
+        "2. Send a <b>screenshot</b> of the payment here\n"
+        "3. We will confirm and process your order"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⬅️ Change method", callback_data="pay_choose")],
+            [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
+        ]
+    )
+    with qr_path.open("rb") as photo:
+        await chat.send_photo(photo=photo, caption=caption, parse_mode="HTML", reply_markup=kb)
+
+
+def build_payment_step_message(user_data: dict, price: float) -> str:
+    """Legacy helper kept for older call sites."""
+    return (
+        f"Amount to pay: <b>{html.escape(format_price(price))}</b>\n\n"
+        "Choose a payment method below."
+    )
+
+
+def build_payment_step_keyboard() -> InlineKeyboardMarkup:
+    return build_payment_method_keyboard()
+
+
+async def send_payment_step(chat, user_data: dict, price: float) -> None:
+    await send_payment_method_choice(chat, price)
 
 
 def format_customer_label(user) -> str:
@@ -1992,8 +2179,7 @@ def build_order_placed_message(
     lines.append("")
     lines.append("✅ Order placed! Our team will contact you shortly.")
     lines.append("")
-    lines.append("‼️ NOTE: Forward this message to your Saved Messages for saving!!!")
-    lines.append("We not save info about orders")
+    lines.append("‼️ NOTE: Forward this message to your Saved Messages for your own copy.")
     return "\n".join(lines)
 
 
@@ -2003,9 +2189,10 @@ async def send_order_message(
     text: str,
     *,
     map_png: Optional[bytes] = None,
+    payment_screenshot_file_id: Optional[str] = None,
     reply_markup=None,
 ) -> None:
-    """Send order text. If map_png is set (admin path), attach Yandex map photo."""
+    """Send order text; optionally attach Yandex map and/or payment screenshot."""
     if map_png and len(text) <= 1024:
         await bot.send_photo(
             chat_id=chat_id,
@@ -2014,21 +2201,29 @@ async def send_order_message(
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
-        return
-    if map_png:
-        # Caption too long for Telegram — send photo, then the full text.
-        await bot.send_photo(
+    else:
+        if map_png:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=BytesIO(map_png),
+                caption="📍 Delivery location",
+            )
+        await bot.send_message(
             chat_id=chat_id,
-            photo=BytesIO(map_png),
-            caption="📍 Delivery location",
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
         )
-    await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode="HTML",
-        reply_markup=reply_markup,
-        disable_web_page_preview=True,
-    )
+    if payment_screenshot_file_id:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=payment_screenshot_file_id,
+                caption="🧾 Payment screenshot",
+            )
+        except Exception as exc:
+            logging.warning("Failed to forward payment screenshot: %s", exc)
 
 
 async def notify_order_admins(
@@ -2036,15 +2231,22 @@ async def notify_order_admins(
     text: str,
     *,
     map_png: Optional[bytes] = None,
+    payment_screenshot_file_id: Optional[str] = None,
     skip_user_id: Optional[int] = None,
 ) -> int:
-    """Send the order + Yandex map to every configured admin. Returns count sent."""
+    """Send the order + map + payment screenshot to every configured admin."""
     sent = 0
     for admin_id in get_order_admin_ids():
         if skip_user_id is not None and admin_id == skip_user_id:
             continue
         try:
-            await send_order_message(context.bot, admin_id, text, map_png=map_png)
+            await send_order_message(
+                context.bot,
+                admin_id,
+                text,
+                map_png=map_png,
+                payment_screenshot_file_id=payment_screenshot_file_id,
+            )
             sent += 1
         except Exception as exc:
             logging.warning("Failed to deliver order to admin %s: %s", admin_id, exc)
@@ -2052,12 +2254,7 @@ async def notify_order_admins(
 
 
 async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Assemble the order and route to payment.
-
-    - If an automated payment method is enabled (ENABLE_PAYMENTS + OxaPay /
-      Telegram Pay) the existing invoice flow runs.
-    - Otherwise the manual flow runs: review → payment step (placeholder) →
-      customer confirms → order is sent to admin(s)."""
+    """Review order → choose USDT or local QR → wait for payment screenshot."""
     query = update.callback_query
     await query.answer()
     chat = query.message.chat
@@ -2088,7 +2285,7 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
     )
 
-    # Automated payment path (only when explicitly enabled and configured).
+    # Optional legacy auto payment (OxaPay / Telegram Pay) when ENABLE_PAYMENTS=true.
     if payments_enabled():
         payment_keyboard = build_checkout_payment_keyboard(user_data)
         if payment_keyboard:
@@ -2101,15 +2298,17 @@ async def checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_telegram_payment(context, chat, user_id, user_data, cart_items, price)
             return
 
-    # Manual payment placeholder → customer confirms → order goes to admins.
-    await send_payment_step(chat, user_data, price)
+    await send_payment_method_choice(chat, price)
 
 
-async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Finalize a manual order: save it, notify admins, confirm to customer."""
-    query = update.callback_query
-    await query.answer()
-    chat = query.message.chat
+async def finalize_order_with_payment_proof(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    payment_screenshot_file_id: str,
+) -> None:
+    """Save order to SQLite, confirm to customer, notify admins with map + screenshot."""
+    chat = update.effective_chat
     user = update.effective_user
     user_data = context.user_data
     cart_items = get_cart_items(user_data)
@@ -2125,7 +2324,11 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
     referred_by = user_data.get("cart_referred_by")
     address = user_data.get("cart_address")
     phone = user_data.get("cart_phone")
-    invoice_id = f"MANUAL-{user.id}-{int(time.time())}"
+    payment_method = user_data.get("payment_method") or "MANUAL"
+    method_tag = "USDT" if payment_method == "USDT" else "QR"
+    invoice_id = f"{method_tag}-{user.id}-{int(time.time())}"
+    customer_name = getattr(user, "full_name", None) or getattr(user, "first_name", None)
+    customer_username = getattr(user, "username", None)
 
     for item in cart_items:
         line_price = float(item.get("line_price", 0))
@@ -2135,22 +2338,39 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
         }
         qty = int(item.get("qty", 1))
         save_order(
-            user.id, product, qty, line_price, invoice_id,
-            discount_code, discount_percent, referred_by, address, phone,
+            user.id,
+            product,
+            qty,
+            line_price,
+            invoice_id,
+            discount_code,
+            discount_percent,
+            referred_by,
+            address,
+            phone,
+            customer_name=customer_name,
+            customer_username=customer_username,
+            payment_method=payment_method,
+            payment_status="proof_submitted",
+            payment_screenshot_file_id=payment_screenshot_file_id,
+            order_total=price,
         )
 
     order_text = build_order_placed_message(
         user, cart_items, price, discount_code, discount_percent, address, phone, invoice_id,
     )
+    # Mention payment method for admins in the same bubble.
+    pay_note = f"\n💳 Payment: {html.escape(str(payment_method))}"
+    if payment_method == "LOCAL_QR" and user_data.get("payment_qr_amount"):
+        pay_note += f" ({html.escape(format_price(user_data['payment_qr_amount']))} QR)"
+    order_text_admin = order_text + pay_note
+
     main_menu_kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Main Menu", callback_data="main_menu")]]
     )
     admin_ids = set(get_order_admin_ids())
     customer_is_admin = user.id in admin_ids
 
-    # Customer confirmation FIRST (text only, no map) — never blocked by map fetch.
-    # If the placer is also an admin, skip this plain copy; they get the admin
-    # version below (with Yandex map) so the chat isn't flooded with duplicates.
     if not customer_is_admin:
         try:
             await send_order_message(
@@ -2162,24 +2382,14 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
         except Exception as exc:
             logging.warning("Customer order confirmation failed: %s", exc)
-            try:
-                await chat.send_message(
-                    order_text,
-                    reply_markup=main_menu_kb,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception:
-                await chat.send_message(
-                    "Order placed! Our team will contact you shortly.",
-                    reply_markup=main_menu_kb,
-                )
+            await chat.send_message(
+                order_text,
+                reply_markup=main_menu_kb,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
-    # Fetch map AFTER customer is confirmed, so a slow/failed Yandex call
-    # cannot make checkout look broken for regular customers.
     map_png = fetch_yandex_map_png(address) if address else None
-
-    # Admin(s): same text + Yandex screenshot.
     delivered = 0
     for admin_id in admin_ids:
         try:
@@ -2187,8 +2397,9 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await send_order_message(
                 context.bot,
                 admin_id,
-                order_text,
+                order_text_admin if admin_id != user.id or customer_is_admin else order_text,
                 map_png=map_png,
+                payment_screenshot_file_id=payment_screenshot_file_id,
                 reply_markup=markup,
             )
             delivered += 1
@@ -2199,6 +2410,66 @@ async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TY
         logging.warning("Order %s saved but no admin received it (check ORDER_ADMIN_IDS).", invoice_id)
 
     clear_cart_after_payment(user_data)
+
+
+async def confirm_order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legacy confirm button — redirect to payment method choice."""
+    query = update.callback_query
+    await query.answer()
+    price = sync_cart_price(context.user_data)
+    await send_payment_method_choice(query.message.chat, price)
+
+
+async def payment_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat = query.message.chat
+    user_data = context.user_data
+    cart_items = get_cart_items(user_data)
+    if not cart_items:
+        await chat.send_message("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
+        return
+    price = sync_cart_price(user_data)
+    if data == "pay_choose":
+        user_data["awaiting_payment_proof"] = False
+        await send_payment_method_choice(chat, price)
+    elif data == "pay_usdt":
+        await send_usdt_payment_instructions(chat, user_data, price)
+    elif data == "pay_local_qr":
+        await send_local_qr_payment_instructions(chat, user_data, price)
+
+
+async def payment_proof_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Customer sends payment screenshot after choosing USDT / local QR.
+
+    If we are not awaiting a proof, fall through to admin catalog ingest when
+    applicable (same update group would otherwise swallow the photo).
+    """
+    user_data = context.user_data
+    if not user_data.get("awaiting_payment_proof"):
+        # Allow admin catalog photos/forwards to be processed.
+        if (
+            update.effective_user
+            and update.effective_user.id == ADMIN_USER_ID
+            and update.message
+            and (update.message.forward_origin or update.message.forward_date or update.message.caption)
+        ):
+            await admin_forwarded_catalog_handler(update, context)
+        return
+    if not update.message or not update.message.photo:
+        return
+    if not get_cart_items(user_data):
+        user_data["awaiting_payment_proof"] = False
+        await update.message.reply_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
+        return
+    file_id = update.message.photo[-1].file_id
+    await update.message.reply_text("Got your payment screenshot. Placing the order…")
+    await finalize_order_with_payment_proof(
+        update,
+        context,
+        payment_screenshot_file_id=file_id,
+    )
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2257,8 +2528,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["awaiting_address"] = False
             context.user_data["awaiting_phone"] = False
             context.user_data["awaiting_discount"] = False
+            context.user_data["awaiting_payment_proof"] = False
             # Always re-send cart at the bottom of the chat (delete old cart msgs first).
             await show_cart(update, context, refresh_at_bottom=True)
+        elif data in ("pay_usdt", "pay_local_qr", "pay_choose"):
+            await payment_method_callback(update, context)
         elif data == "confirm_order":
             await confirm_order_handler(update, context)
         elif data in ["enter_address", "enter_phone", "enter_discount", "checkout", "show_location_keyboard"]:
@@ -3171,6 +3445,13 @@ if __name__ == "__main__":
         CommandHandler("sync_last_60", sync_last_60_cmd, filters=ADMIN_USER_FILTER)
     )
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_catalog_handler))
+    # Customer payment screenshot (private) — before admin catalog ingest.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.PHOTO,
+            payment_proof_photo_handler,
+        )
+    )
     # Admin catalog ingest: forwards (any media) + photos with captions (copy/share without forward flag)
     _admin_catalog_filter = (
         filters.ChatType.PRIVATE
