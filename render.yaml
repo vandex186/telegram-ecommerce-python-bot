@@ -20,14 +20,12 @@ services:
         value: "5"
       - key: DATABASE_FILE
         value: "/data/orders.db"
-      - key: USDT_WALLET
-        sync: false
-      - key: USDT_NETWORK
-        value: "TRC20"
+      - key: PAYMENT_USDT_QR_DIR
+        value: "payment_qr/usdt"
       - key: PAYMENT_QR_DIR
         value: "payment_qr/local"
       - key: PAYMENT_QR_LABEL
-        value: "Local QR"
+        value: "ABA QR"
       - key: OXAPAY_API_KEY
         sync: false
       - key: TZ

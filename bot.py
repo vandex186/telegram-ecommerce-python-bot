@@ -1893,9 +1893,9 @@ def project_path(rel: str) -> Path:
     return Path(__file__).resolve().parent / p
 
 
-def list_local_qr_options() -> list:
-    """Return sorted [(amount_int, path), ...] from PAYMENT_QR_DIR (30.png, 50.jpg, ...)."""
-    qr_dir = project_path(getattr(config, "PAYMENT_QR_DIR", "payment_qr/local"))
+def list_qr_options(qr_dir_rel: str) -> list:
+    """Return sorted [(amount_int, path), ...] from a folder (30.png, 50.jpg, ...)."""
+    qr_dir = project_path(qr_dir_rel)
     if not qr_dir.is_dir():
         return []
     options = []
@@ -1914,9 +1914,9 @@ def list_local_qr_options() -> list:
     return options
 
 
-def match_local_qr_for_amount(price: float) -> Optional[tuple]:
+def match_qr_for_amount(price: float, qr_dir_rel: str) -> Optional[tuple]:
     """Pick smallest QR amount >= order total. Falls back to largest if none cover it."""
-    options = list_local_qr_options()
+    options = list_qr_options(qr_dir_rel)
     if not options:
         return None
     rounded = int(round(float(price)))
@@ -1926,12 +1926,12 @@ def match_local_qr_for_amount(price: float) -> Optional[tuple]:
     return options[-1]
 
 
-def usdt_qr_path() -> Optional[Path]:
-    raw = getattr(config, "USDT_QR_IMAGE", "payment_qr/usdt.png") or ""
-    if not raw.strip():
-        return None
-    path = project_path(raw.strip())
-    return path if path.is_file() else None
+def match_local_qr_for_amount(price: float) -> Optional[tuple]:
+    return match_qr_for_amount(price, getattr(config, "PAYMENT_QR_DIR", "payment_qr/local"))
+
+
+def match_usdt_qr_for_amount(price: float) -> Optional[tuple]:
+    return match_qr_for_amount(price, getattr(config, "PAYMENT_USDT_QR_DIR", "payment_qr/usdt"))
 
 
 def build_payment_method_keyboard() -> InlineKeyboardMarkup:
@@ -1955,57 +1955,26 @@ async def send_payment_method_choice(chat, price: float) -> None:
     )
 
 
-async def send_usdt_payment_instructions(chat, user_data: dict, price: float) -> None:
-    wallet = (getattr(config, "USDT_WALLET", "") or "").strip()
-    network = (getattr(config, "USDT_NETWORK", "TRC20") or "TRC20").strip()
-    if not wallet:
-        await chat.send_message(
-            "USDT payments are not configured yet.\n"
-            "Admin: set USDT_WALLET in Environment / .env.",
-            reply_markup=build_payment_method_keyboard(),
-        )
-        return
-    user_data["payment_method"] = "USDT"
-    user_data["awaiting_payment_proof"] = True
-    user_data["awaiting_address"] = False
-    user_data["awaiting_phone"] = False
-    user_data["awaiting_discount"] = False
-    caption = (
-        f"💎 <b>USDT payment</b>\n\n"
-        f"Amount: <b>{html.escape(format_price(price))}</b>\n"
-        f"Network: <code>{html.escape(network)}</code>\n"
-        f"Wallet:\n<code>{html.escape(wallet)}</code>\n\n"
-        "1. Send the exact amount to this wallet\n"
-        "2. Send a <b>screenshot</b> of the payment here\n"
-        "3. We will confirm and process your order"
-    )
-    qr = usdt_qr_path()
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("⬅️ Change method", callback_data="pay_choose")],
-            [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
-        ]
-    )
-    if qr:
-        with qr.open("rb") as photo:
-            await chat.send_photo(photo=photo, caption=caption, parse_mode="HTML", reply_markup=kb)
-    else:
-        await chat.send_message(caption, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
-
-
-async def send_local_qr_payment_instructions(chat, user_data: dict, price: float) -> None:
-    matched = match_local_qr_for_amount(price)
-    label = getattr(config, "PAYMENT_QR_LABEL", "Local QR") or "Local QR"
+async def send_qr_payment_instructions(
+    chat,
+    user_data: dict,
+    price: float,
+    *,
+    payment_method: str,
+    title: str,
+    qr_dir_rel: str,
+    not_configured_hint: str,
+) -> None:
+    """Show amount-matched QR image; customer pays and sends a screenshot."""
+    matched = match_qr_for_amount(price, qr_dir_rel)
     if not matched:
         await chat.send_message(
-            f"{label} payments are not configured yet.\n"
-            "Admin: put QR images in payment_qr/local/ named by amount "
-            "(e.g. 30.png, 50.png, 100.png).",
+            not_configured_hint,
             reply_markup=build_payment_method_keyboard(),
         )
         return
     qr_amount, qr_path = matched
-    user_data["payment_method"] = "LOCAL_QR"
+    user_data["payment_method"] = payment_method
     user_data["payment_qr_amount"] = qr_amount
     user_data["awaiting_payment_proof"] = True
     user_data["awaiting_address"] = False
@@ -2017,12 +1986,12 @@ async def send_local_qr_payment_instructions(chat, user_data: dict, price: float
         note = (
             f"\n\n⚠️ Closest QR is <b>{html.escape(format_price(qr_amount))}</b> "
             f"for your order of <b>{html.escape(order_amount)}</b>. "
-            "Pay the QR amount shown."
+            "Pay the amount on the QR."
         )
     caption = (
-        f"📱 <b>{html.escape(label)}</b>\n\n"
+        f"{title}\n\n"
         f"Order total: <b>{html.escape(order_amount)}</b>\n"
-        f"Pay: <b>{html.escape(format_price(qr_amount))}</b>\n"
+        f"Pay: <b>{html.escape(format_price(qr_amount))}</b>"
         f"{note}\n\n"
         "1. Scan the QR and pay\n"
         "2. Send a <b>screenshot</b> of the payment here\n"
@@ -2036,6 +2005,39 @@ async def send_local_qr_payment_instructions(chat, user_data: dict, price: float
     )
     with qr_path.open("rb") as photo:
         await chat.send_photo(photo=photo, caption=caption, parse_mode="HTML", reply_markup=kb)
+
+
+async def send_usdt_payment_instructions(chat, user_data: dict, price: float) -> None:
+    await send_qr_payment_instructions(
+        chat,
+        user_data,
+        price,
+        payment_method="USDT",
+        title="💎 <b>USDT payment</b>",
+        qr_dir_rel=getattr(config, "PAYMENT_USDT_QR_DIR", "payment_qr/usdt"),
+        not_configured_hint=(
+            "USDT payments are not configured yet.\n"
+            "Admin: add QR images to payment_qr/usdt/ named by amount "
+            "(e.g. 30.png, 50.png, 100.png)."
+        ),
+    )
+
+
+async def send_local_qr_payment_instructions(chat, user_data: dict, price: float) -> None:
+    label = getattr(config, "PAYMENT_QR_LABEL", "Local QR") or "Local QR"
+    await send_qr_payment_instructions(
+        chat,
+        user_data,
+        price,
+        payment_method="LOCAL_QR",
+        title=f"📱 <b>{html.escape(label)}</b>",
+        qr_dir_rel=getattr(config, "PAYMENT_QR_DIR", "payment_qr/local"),
+        not_configured_hint=(
+            f"{label} payments are not configured yet.\n"
+            "Admin: add QR images to payment_qr/local/ named by amount "
+            "(e.g. 30.png, 50.png, 100.png)."
+        ),
+    )
 
 
 def build_payment_step_message(user_data: dict, price: float) -> str:
@@ -2361,7 +2363,7 @@ async def finalize_order_with_payment_proof(
     )
     # Mention payment method for admins in the same bubble.
     pay_note = f"\n💳 Payment: {html.escape(str(payment_method))}"
-    if payment_method == "LOCAL_QR" and user_data.get("payment_qr_amount"):
+    if user_data.get("payment_qr_amount"):
         pay_note += f" ({html.escape(format_price(user_data['payment_qr_amount']))} QR)"
     order_text_admin = order_text + pay_note
 

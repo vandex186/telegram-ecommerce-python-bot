@@ -52,11 +52,9 @@ PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 PAYMENT_CURRENCY = os.getenv("PAYMENT_CURRENCY", "USD")
 ENABLE_TELEGRAM_PAY = _env_bool("ENABLE_TELEGRAM_PAY", False)
 
-# Manual payment: USDT wallet (crypto) + local QR codes by amount.
-USDT_WALLET = os.getenv("USDT_WALLET", "").strip()
-USDT_NETWORK = os.getenv("USDT_NETWORK", "TRC20").strip() or "TRC20"
-USDT_QR_IMAGE = os.getenv("USDT_QR_IMAGE", "payment_qr/usdt.png").strip()
-# Folder with QR images named by amount: 30.png, 40.png, 50.png, ...
+# Manual payment: QR images only (amount-named files in folders below).
+# payment_qr/usdt/30.png, payment_qr/local/50.png, ...
+PAYMENT_USDT_QR_DIR = os.getenv("PAYMENT_USDT_QR_DIR", "payment_qr/usdt").strip() or "payment_qr/usdt"
 PAYMENT_QR_DIR = os.getenv("PAYMENT_QR_DIR", "payment_qr/local").strip() or "payment_qr/local"
 PAYMENT_QR_LABEL = os.getenv("PAYMENT_QR_LABEL", "Local QR").strip() or "Local QR"
 
@@ -67,7 +65,7 @@ ADMIN_USER_ID = _env_int("ADMIN_USER_ID", 123456789) or 123456789
 # Each recipient must have opened a private chat with the bot at least once.
 ORDER_ADMIN_IDS = _env_int_list("ORDER_ADMIN_IDS") or [ADMIN_USER_ID]
 
-# Legacy text (optional override). Prefer USDT_WALLET + PAYMENT_QR_DIR for checkout.
+# Legacy text (optional override). Checkout uses QR folders only.
 PAYMENT_INSTRUCTIONS = os.getenv("PAYMENT_INSTRUCTIONS", "")
 
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@your_support_handle")

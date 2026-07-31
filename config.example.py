@@ -52,9 +52,8 @@ PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 PAYMENT_CURRENCY = os.getenv("PAYMENT_CURRENCY", "USD")
 ENABLE_TELEGRAM_PAY = _env_bool("ENABLE_TELEGRAM_PAY", False)
 
-USDT_WALLET = os.getenv("USDT_WALLET", "").strip()
-USDT_NETWORK = os.getenv("USDT_NETWORK", "TRC20").strip() or "TRC20"
-USDT_QR_IMAGE = os.getenv("USDT_QR_IMAGE", "payment_qr/usdt.png").strip()
+# Manual payment: QR images only (see payment_qr/README.md).
+PAYMENT_USDT_QR_DIR = os.getenv("PAYMENT_USDT_QR_DIR", "payment_qr/usdt").strip() or "payment_qr/usdt"
 PAYMENT_QR_DIR = os.getenv("PAYMENT_QR_DIR", "payment_qr/local").strip() or "payment_qr/local"
 PAYMENT_QR_LABEL = os.getenv("PAYMENT_QR_LABEL", "Local QR").strip() or "Local QR"
 
