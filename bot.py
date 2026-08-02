@@ -229,7 +229,7 @@ def build_cart_items_message(user_data: dict) -> str:
 def build_discount_line(discount_code, discount_percent: int) -> str:
     if discount_percent:
         return f"🏷 Discount: {discount_percent}% ({html.escape(str(discount_code or ''))})"
-    return "🏷 Discount: No"
+    return "🏷 Discount: — not set —"
 
 
 def build_cart_footer_message(user_data: Optional[dict] = None) -> str:
