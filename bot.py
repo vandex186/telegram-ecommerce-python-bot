@@ -1926,8 +1926,10 @@ def match_usdt_qr_for_amount(price: float) -> Optional[tuple]:
 def build_payment_method_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💵 Оплатить по QR коду (USD)", callback_data="pay_local_qr")],
-            [InlineKeyboardButton("🪙 Оплатить по QR коду (USDT / Крипта)", callback_data="pay_usdt")],
+            [
+                InlineKeyboardButton("Pay by KHQR", callback_data="pay_local_qr"),
+                InlineKeyboardButton("Pay by USDT", callback_data="pay_usdt"),
+            ],
             [InlineKeyboardButton("⬅️ Назад в корзину", callback_data="back_to_cart")],
         ]
     )
