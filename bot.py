@@ -1904,10 +1904,12 @@ def list_qr_options(qr_dir_rel: str) -> list:
 
 
 def match_qr_for_amount(price: float, qr_dir_rel: str) -> Optional[tuple]:
-    """Pick smallest QR amount >= order total. Falls back to largest if none cover it."""
+    """Pick smallest QR amount >= order total. Falls back to any available QR image if none match."""
     options = list_qr_options(qr_dir_rel)
     if not options:
-        return None
+        options = list_qr_options("payment_qr/local") or list_qr_options("payment_qr/usdt")
+        if not options:
+            return None
     rounded = int(round(float(price)))
     for amount, path in options:
         if amount >= rounded:
@@ -1930,15 +1932,15 @@ def build_payment_method_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Pay by KHQR", callback_data="pay_local_qr"),
                 InlineKeyboardButton("Pay by USDT", callback_data="pay_usdt"),
             ],
-            [InlineKeyboardButton("⬅️ Назад в корзину", callback_data="back_to_cart")],
+            [InlineKeyboardButton("⬅️ Back to Cart", callback_data="back_to_cart")],
         ]
     )
 
 
 async def send_payment_method_choice(chat, price: float) -> None:
     await chat.send_message(
-        f"Сумма к оплате: <b>{html.escape(format_price(price))}</b>\n\n"
-        "Выберите способ оплаты:",
+        f"Amount to pay: <b>{html.escape(format_price(price))}</b>\n\n"
+        "Choose payment method:",
         reply_markup=build_payment_method_keyboard(),
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -1974,23 +1976,23 @@ async def send_qr_payment_instructions(
     note = ""
     if abs(float(qr_amount) - float(price)) >= 0.01:
         note = (
-            f"\n\n⚠️ Ближайший QR-код на сумму <b>{html.escape(format_price(qr_amount))}</b> "
-            f"для вашего заказа на <b>{html.escape(order_amount)}</b>. "
-            "Оплатите сумму, указанную на QR-коде."
+            f"\n\n⚠️ Closest QR code is <b>{html.escape(format_price(qr_amount))}</b> "
+            f"for your order of <b>{html.escape(order_amount)}</b>. "
+            "Please pay the amount shown on the QR code."
         )
     caption = (
         f"{title}\n\n"
-        f"Сумма заказа: <b>{html.escape(order_amount)}</b>\n"
-        f"К оплате: <b>{html.escape(format_price(qr_amount))}</b>"
+        f"Order total: <b>{html.escape(order_amount)}</b>\n"
+        f"To pay: <b>{html.escape(format_price(qr_amount))}</b>"
         f"{note}\n\n"
-        "1. Отсканируйте QR-код и совершите оплату\n"
-        "2. Отправьте <b>скриншот чека</b> в ответ на это сообщение\n"
-        "3. Ваш заказ будет принят и передан администратору"
+        "1. Scan the QR code and complete payment\n"
+        "2. Send a <b>screenshot of the receipt</b> in reply to this message\n"
+        "3. Your order will be accepted and sent to the administrator"
     )
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("⬅️ Сменить способ оплаты", callback_data="pay_choose")],
-            [InlineKeyboardButton("Назад в корзину", callback_data="back_to_cart")],
+            [InlineKeyboardButton("⬅️ Change payment method", callback_data="pay_choose")],
+            [InlineKeyboardButton("Back to Cart", callback_data="back_to_cart")],
         ]
     )
     with qr_path.open("rb") as photo:
@@ -2003,12 +2005,12 @@ async def send_usdt_payment_instructions(chat, user_data: dict, price: float) ->
         user_data,
         price,
         payment_method="USDT",
-        title="🪙 <b>Оплата через USDT (Крипта)</b>",
+        title="🪙 <b>Pay via USDT (Crypto)</b>",
         qr_dir_rel=getattr(config, "PAYMENT_USDT_QR_DIR", "payment_qr/usdt"),
         not_configured_hint=(
-            "Оплата через USDT временно не настроена.\n"
-            "Администратор: добавьте изображения QR-кодов в папку payment_qr/usdt/ "
-            "с именами по суммам (например: 30.png, 40.png, 50.png ... 290.png)."
+            "USDT payments are temporarily not configured.\n"
+            "Admin: add QR code images to payment_qr/usdt/ named by amount "
+            "(e.g. 30.png, 40.png, 50.png ... 290.png)."
         ),
     )
 
@@ -2020,12 +2022,12 @@ async def send_local_qr_payment_instructions(chat, user_data: dict, price: float
         user_data,
         price,
         payment_method="LOCAL_QR",
-        title="💵 <b>Оплата по QR (USD)</b>",
+        title="💵 <b>Pay via KHQR (USD)</b>",
         qr_dir_rel=getattr(config, "PAYMENT_QR_DIR", "payment_qr/local"),
         not_configured_hint=(
-            "Оплата по QR (USD) временно не настроена.\n"
-            "Администратор: добавьте изображения QR-кодов в папку payment_qr/local/ "
-            "с именами по суммам (например: 30.png, 40.png, 50.png ... 290.png)."
+            "KHQR payments are temporarily not configured.\n"
+            "Admin: add QR code images to payment_qr/local/ named by amount "
+            "(e.g. 30.png, 40.png, 50.png ... 290.png)."
         ),
     )
 
@@ -2169,9 +2171,9 @@ def build_order_placed_message(
     lines.append("")
     lines.append(f"TOTAL: <b>{html.escape(amount)}</b>{total_tail}")
     lines.append("")
-    lines.append("✅ Заказ принят! Наш администратор свяжется с вами в ближайшее время.")
+    lines.append("✅ Order accepted! Our administrator will contact you shortly.")
     lines.append("")
-    lines.append("‼️ Сохраните или перешлите это сообщение в Избранное.")
+    lines.append("‼️ Save or forward this message to your Saved Messages for your records.")
     return "\n".join(lines)
 
 
@@ -2456,7 +2458,7 @@ async def payment_proof_photo_handler(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("Your cart is empty.", reply_markup=build_empty_cart_keyboard())
         return
     file_id = update.message.photo[-1].file_id
-    await update.message.reply_text("Скриншот оплаты получен. Оформляем и передаем ваш заказ…")
+    await update.message.reply_text("Payment screenshot received. Processing and placing your order…")
     await finalize_order_with_payment_proof(
         update,
         context,
