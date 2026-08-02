@@ -436,13 +436,8 @@ def build_location_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def build_phone_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("Share my phone number", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Type your phone number",
-    )
+def build_phone_reply_keyboard() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
 
 
 def is_desktop_or_web_telegram(update: Update) -> bool:
@@ -454,20 +449,13 @@ def is_desktop_or_web_telegram(update: Update) -> bool:
     user = update.effective_user
     if user and user.api_kwargs:
         client = str(user.api_kwargs.get("client_type") or user.api_kwargs.get("platform") or "").lower()
-        if client in ("desktop", "web", "tdesktop", "webk", "weba", "macos", "windows", "linux"):
+        if client in ("desktop", "web", "tdesktop", "weba", "weba", "macos", "windows", "linux"):
             return True
     return False
 
 
 def should_offer_gps_reply_keyboard(user_data: dict, update: Update) -> bool:
-    """Show "use my current location" only when GPS already worked for this user.
-
-    Telegram does not tell us mobile vs desktop, so we cannot safely show the
-    GPS button to first-time visitors (it appears on Desktop too and is useless
-    there). After a successful location pin share we treat the user as
-    GPS-capable (almost always mobile) and offer the shortcut next time.
-    Users who only paste Google Maps links never see the button.
-    """
+    """Show "use my current location" only when GPS already worked for this user."""
     if is_desktop_or_web_telegram(update):
         return False
     if user_data.get("is_text_location_user"):
@@ -499,9 +487,8 @@ async def send_phone_prompt(chat, user_data: dict) -> None:
     user_data["awaiting_address"] = False
     user_data["awaiting_discount"] = False
     await chat.send_message(
-        "Please share your phone number for delivery.\n"
-        "Tap the button below or type your number.",
-        reply_markup=build_phone_reply_keyboard(),
+        "Please type your phone number for delivery in the chat.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
