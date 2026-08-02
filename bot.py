@@ -1800,7 +1800,9 @@ async def address_message_handler(update: Update, context: ContextTypes.DEFAULT_
         phone = update.message.text.strip()
         digits = re.sub(r"\D", "", phone)
         if len(digits) < 8:
-            await update.message.reply_text("Please send a valid phone number.")
+            await update.message.reply_text(
+                "Please send a valid phone number so the delivery driver can call you."
+            )
             return
         user_data["cart_phone"] = phone
         user_data["awaiting_phone"] = False
